@@ -11,6 +11,7 @@ from engine import AsyncLogPipeline
 
 DASHBOARD_FILE = Path(__file__).parent / "dashboard.html"
 SEARCH_FILE = Path(__file__).parent / "search.html"
+THREATS_FILE = Path(__file__).parent / "threats.html"
 
 pipeline = AsyncLogPipeline()
 START_TIME = time.time()
@@ -262,6 +263,55 @@ async def handle_instances(request: web.Request) -> web.Response:
     except Exception as exc:
         return web.json_response({"instances": [], "error": str(exc)})
     return web.json_response({"instances": names, "cached": False})
+
+
+async def handle_threats(request: web.Request) -> web.Response:
+    """Hostile traffic, clustered by technique and by actor fingerprint.
+
+    /threats?since=24h&limit=5000
+    /threats?format=json
+
+    Reads the same index the search UI reads, classifies each request against
+    ttp.py, and groups actors that ran the same techniques -- the addresses
+    rotate, the tooling does not.
+    """
+    import ttp
+
+    since = request.query.get("since", "24h")
+    try:
+        limit = min(int(request.query.get("limit", 5000)), 20000)
+    except ValueError:
+        limit = 5000
+
+    since_s = None
+    mult = {"m": 60, "h": 3600, "d": 86400, "s": 1}
+    try:
+        since_s = int(since[:-1]) * mult[since[-1]] if since[-1] in mult else int(since)
+    except Exception:
+        since_s = 86400
+
+    # Access lines are the source: HTTP/1.1 is in every one of them and the raw
+    # column is trigram-indexed, so this stays cheap as the table grows.
+    rows = await pipeline.pg.query_logs(q="HTTP/1.1", since_s=since_s, limit=limit)
+
+    def _internal(ip: str) -> bool:
+        """Anything the topology can name is ours, by definition."""
+        try:
+            resolved = pipeline.graph.resolve_node_id(ip)
+            return bool(resolved) and not resolved.startswith("external:") and resolved != "unknown"
+        except Exception:
+            return False
+
+    view = ttp.build_threat_view(rows, is_internal=_internal)
+    view["window"] = since
+    view["events_scanned"] = len(rows)
+
+    if request.query.get("format") == "json" or "text/html" not in (request.headers.get("Accept") or ""):
+        return web.json_response(view)
+    if THREATS_FILE.exists():
+        return web.Response(text=THREATS_FILE.read_text(encoding="utf-8"),
+                            content_type="text/html")
+    return web.json_response(view)
 
 async def handle_search_ui(request: web.Request) -> web.Response:
     """The search UI. The /query API has been usable from curl for a while and
@@ -603,6 +653,7 @@ async def main():
     app.router.add_get("/templates", handle_templates)
     app.router.add_get("/query", handle_query)
     app.router.add_get("/search", handle_search_ui)
+    app.router.add_get("/threats", handle_threats)
     app.router.add_get("/instances", handle_instances)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/anomalies", handle_anomalies)
