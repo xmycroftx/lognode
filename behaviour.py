@@ -17,7 +17,7 @@ one records what it is inferring rather than asserting a verdict.
 """
 import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 # uvicorn:  INFO:     1.2.3.4:5678 - "GET /p HTTP/1.1" 404 Not Found
@@ -27,9 +27,32 @@ UVICORN_RE = re.compile(
 
 # nginx combined: 1.2.3.4 - - [date] "GET /p HTTP/1.1" 404 134 "-" "UA string"
 NGINX_RE = re.compile(
-    r"^(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+\S+\s+\S+\s+\[[^\]]+\]\s+"
+    r"^(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+\S+\s+\S+\s+\[(?P<when>[^\]]+)\]\s+"
     r'"(?P<method>[A-Z]+)\s+(?P<path>\S+)\s+HTTP/(?P<proto>[\d.]+)"\s+'
     r'(?P<status>\d{3})\s+\d+\s+"(?P<referer>[^"]*)"\s+"(?P<ua>[^"]*)"')
+
+_MONTHS = {m: i for i, m in enumerate(
+    "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
+_CLF = re.compile(r"(\d{2})/(\w{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2})\s*([+-]\d{4})?")
+
+
+def clf_time(when: str):
+    """'15/Sep/2026:06:04:42 +0000' -> epoch seconds, or None."""
+    m = _CLF.search(when or "")
+    if not m:
+        return None
+    day, mon, year, hh, mm, ss, off = m.groups()
+    if mon not in _MONTHS:
+        return None
+    try:
+        t = datetime(int(year), _MONTHS[mon], int(day), int(hh), int(mm), int(ss),
+                     tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+    if off:
+        sign = 1 if off[0] == "+" else -1
+        t -= sign * (int(off[1:3]) * 3600 + int(off[3:5]) * 60)
+    return t
 
 # Agents that say what they are. Honesty is not innocence -- zgrab is still a
 # scanner -- but an honest scanner and a browser impersonator are different
@@ -111,7 +134,7 @@ def profile(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     by_ip: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {"times": [], "ports": set(), "uas": set(), "paths": [],
                  "statuses": [], "protos": set(), "methods": set(),
-                 "referers": 0, "assets": 0, "requests": 0})
+                 "referers": 0, "assets": 0, "requests": 0, "port_seen": 0})
 
     for ev in events:
         p = parse_line(ev.get("raw") or "")
@@ -119,7 +142,12 @@ def profile(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
             continue
         a = by_ip[p["ip"]]
         a["requests"] += 1
-        a["ports"].add(p["sport"] if "sport" in p else None)
+        # nginx's combined format has no source port; uvicorn's line does. Track
+        # how many requests actually carried one, so the keep-alive tell below
+        # describes the observations it is based on rather than the whole actor.
+        if p.get("sport"):
+            a["ports"].add(p["sport"])
+            a["port_seen"] = a.get("port_seen", 0) + 1
         a["protos"].add(p.get("proto"))
         a["methods"].add(p.get("method"))
         a["paths"].append(p["path"])
@@ -130,7 +158,11 @@ def profile(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
             a["referers"] += 1
         if ASSET_RE.search(p["path"]):
             a["assets"] += 1
-        t = _ts(ev.get("timestamp"))
+        # The log line's OWN clock beats the ingest clock. A backfill or a
+        # batched shipment arrives with hundreds of identical ingest
+        # timestamps, which would read as a single enormous burst and invent
+        # cadence tells that never happened.
+        t = clf_time(p.get("when")) or _ts(ev.get("timestamp"))
         if t:
             a["times"].append(t)
 
@@ -185,9 +217,12 @@ def _tells(ip: str, a: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- connection reuse ---
     ports = {p for p in a["ports"] if p}
-    if len(ports) == 1 and a["requests"] >= 10:
-        tells.append("all %d requests on ONE connection (port %s) -- keep-alive pipelining"
-                     % (a["requests"], next(iter(ports))))
+    port_seen = a.get("port_seen", 0)
+    if len(ports) == 1 and port_seen >= 10:
+        qualifier = ("all %d requests" % port_seen if port_seen == a["requests"]
+                     else "%d of %d requests" % (port_seen, a["requests"]))
+        tells.append("%s on ONE connection (port %s) -- keep-alive pipelining"
+                     % (qualifier, next(iter(ports))))
 
     # --- persistence past failure ---
     if worst_404 >= 20:

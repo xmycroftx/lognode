@@ -85,5 +85,31 @@ multi = B.profile([uv("203.0.113.6", "/p%d" % i, port=str(40000 + i), t=i) for i
 check("many connections does not trip the keep-alive tell",
       not any("ONE connection" in t for t in multi["tells"]))
 
+# --- event time beats ingest time -------------------------------------------
+check("parses a CLF timestamp", B.clf_time("15/Sep/2026:06:04:42 +0000") is not None)
+check("rejects nonsense", B.clf_time("not a date") is None)
+
+# 30 nginx lines a minute apart, all handed the SAME ingest timestamp -- which is
+# exactly what a backfill or a batched shipment looks like.
+batched = []
+for i in range(30):
+    line = ('203.0.113.9 - - [15/Sep/2026:%02d:%02d:00 +0000] "GET /p%d HTTP/1.1" 404 134 "-" "%s"'
+            % (6 + i // 60, i % 60, i, CHROME))
+    batched.append({"raw": line, "timestamp": 1789000000})
+b = B.profile(batched)["203.0.113.9"]
+check("batched ingest does not fabricate a burst", b["peak_rate_per_s"] < 1.0,
+      "rate=%s" % b["peak_rate_per_s"])
+check("no scripted-cadence tell from a backfill",
+      not any("requests/second" in t for t in b["tells"]))
+
+# --- mixing two log dialects must not overclaim -----------------------------
+mixed = [uv("203.0.113.10", "/p%d" % i, t=i) for i in range(12)]
+mixed += [ng("203.0.113.10", "/q%d" % i, CHROME, t=100 + i) for i in range(12)]
+mx = B.profile(mixed)["203.0.113.10"]
+check("counts requests from both dialects", mx["requests"] == 24, "got=%d" % mx["requests"])
+ka = [t for t in mx["tells"] if "ONE connection" in t]
+check("keep-alive tell is scoped to port-bearing requests only",
+      ka and "12 of 24" in ka[0], str(ka))
+
 print("  ---", "ALL PASS" if ok else "FAILURES PRESENT")
 raise SystemExit(0 if ok else 1)
