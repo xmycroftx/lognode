@@ -108,6 +108,22 @@ check("internal addresses excluded from actors",
 check("exclusions are reported, not silent",
       len(v2["excluded_internal"]) == 3, str(v2["excluded_internal"]))
 
+# --- techniques the :80 traffic revealed ------------------------------------
+for p_ in ["/8.php", "/2P.php", "/bnbfggf.php", "/BDKR28WP.php", "/i.php"]:
+    check("webshell hunt: %s" % p_, tech(p_) == "webshell-probe", "got=%s" % tech(p_))
+check("a long random php is still caught via the short form",
+      tech("/0.php") == "webshell-probe")
+for p_ in ["/config/mail.php", "/config/smtp.php", "/application/config/email.php",
+           "/twilio.env", "/aws.yml", "/sendgrid.env"]:
+    check("mail/cloud creds: %s" % p_, tech(p_) == "secret-file-harvest", "got=%s" % tech(p_))
+check("appliance probe (Dahua/Hikvision)", tech("/SDK/webLanguage") == "appliance-probe")
+check("appliance probe (ISAPI)", tech("/ISAPI/Security/users") == "appliance-probe")
+
+# a server collapses repeated slashes, so an anchored rule must not be evadable
+check("//x.php does not evade the /x.php rule", tech("//0.php") == "webshell-probe")
+check("///admin evades nothing", tech("///admin") == "admin-discovery")
+check("a query string does not evade it", tech("/fffm.php?p=1") == "webshell-probe")
+
 # --- every dialect the profiler understands, the classifier must too --------
 NGINX = ('45.159.230.92 - - [15/Sep/2026:00:07:35 +0000] '
          '"GET /.env HTTP/1.1" 404 162 "-" "Mozilla/5.0"')

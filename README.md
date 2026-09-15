@@ -152,6 +152,35 @@ view says so rather than inferring innocence from absence.
 > format does not; nginx's combined format does. Both dialects are parsed, so
 > point it at whichever log has the claim.
 
+## Triage, not alerting
+
+Detections become **findings**: rows with state, not messages in a chat channel.
+A finding is raised by a detector, deduplicated by fingerprint, reviewed by an
+agent, and then either stays dismissed or does not come back.
+
+```
+GET  /findings?state=new       what is waiting
+GET  /findings/{id}            full evidence
+POST /findings/{id}/verdict    record a judgement
+GET  /findings/summary         how much, and how old
+```
+
+`mcp_server.py` exposes `list_findings`, `get_finding`, `submit_verdict` and
+`triage_summary`, so an MCP-speaking agent can pull the queue, investigate with
+`query_logs` and the graph tools, and write back a verdict with its reasoning.
+
+Two properties worth the design:
+
+**A dismissal sticks.** Re-detecting the same subject bumps its occurrence count
+and refreshes its evidence — it does not return to the queue. Triage is only
+worth doing if the answer persists, and this is the thing an alert channel
+fundamentally cannot do.
+
+**Nothing executes anything.** A verdict may *recommend* an action; carrying it
+out stays a human decision. An agent that can both judge and act on its own
+judgement has no check on it. A rationale is required, and verdicts outside the
+known set are refused — a judgement nobody can audit is worse than none.
+
 ## Collectors
 
 Optional, and plain enough to read in a sitting:

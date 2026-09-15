@@ -30,7 +30,13 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
     # spellings (/env, /env.txt, /config.env) are as common in the data as the
     # dotted ones and were missed by the first version of this rule.
     ("secret-file-harvest", "credential-access", re.compile(
-        r"(?:^|/)\.?env(?:$|[./_-])|/\.aws/|secrets?[._-]|credentials"
+        r"(?:^|/)\.?env(?:$|[./_-])|[A-Za-z0-9_-]+\.env$|/\.aws/|aws\.ya?ml"
+        r"|secrets?[._-]|credentials"
+        # Mail and SMTP configuration is credential material in its own right:
+        # a working relay is the product, which is why these are hunted as hard
+        # as database passwords.
+        r"|(?:mail|smtp|email|sendmail|postfix|twilio|sendgrid|mailgun)"
+        r"[^/]*\.(?:php|env|ya?ml|json|ini|conf)$"
         r"|wp-config\.php|settings\.py|/config\.py|config\.(?:json|js|php|ya?ml|env)"
         r"|database\.ya?ml|appsettings[^/]*\.json|application\.ya?ml"
         r"|docker-compose\.ya?ml?|\.npmrc|\.htpasswd|/credentials", re.I)),
@@ -60,8 +66,9 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
     ("path-traversal", "discovery", re.compile(
         r"\.\./|\.\.%2f|%2e%2e|/etc/passwd|/proc/self", re.I)),
 
+    # Named shells: someone installing or calling their own.
     ("webshell-probe", "execution", re.compile(
-        r"^/(?:[a-z]{1,3}\.php|shell\.php|cmd\.php|alfa[^/]*\.php|wso\.php"
+        r"^/(?:shell\.php|cmd\.php|alfa[^/]*\.php|wso\.php"
         r"|up\.php|adminer\.php|backdoor)", re.I)),
 
     ("info-disclosure", "discovery", re.compile(
@@ -72,6 +79,14 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
     ("api-discovery", "discovery", re.compile(
         r"^/(?:graphql|api(?:$|/)|v[0-9]+/|swagger|openapi|\.well-known/)"
         r"|/api/graphql", re.I)),
+
+    # Network cameras, NVRs and routers. /SDK/webLanguage is a Dahua/Hikvision
+    # path; these arrive on :80 because that is where such devices live, and
+    # they are a different target class from a web application.
+    ("appliance-probe", "discovery", re.compile(
+        r"/SDK/webLanguage|/ISAPI/|/onvif|/cgi-bin/(?:luci|hedwig|nas_sharing)"
+        r"|/dana-na/|/HNAP1|/setup\.cgi|/boaform|/GponForm|/tmUnblock"
+        r"|/streaming/channels|/device\.rsp", re.I)),
 
     ("cms-probe", "discovery", re.compile(
         r"/wp-(?:admin|login|content|includes|json)|xmlrpc\.php|rest_route"
@@ -104,6 +119,15 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
         r"/[^/]*(?:package|composer|yarn|gemfile|pnpm)[^/]*\.(?:json|lock)$"
         r"|\.lock$", re.I)),
 
+    # The other half of webshell-probe, and deliberately LAST of the specific
+    # rules: a short arbitrary .php at web root -- /8.php, /2P.php,
+    # /bnbfggf.php -- is someone checking whether a backdoor SOMEBODY ELSE
+    # dropped still answers. Placed here because it is a shape heuristic, and
+    # putting it above the named rules made it swallow /phpinfo.php and
+    # /wp-login.php, which have better names available.
+    ("webshell-probe", "execution", re.compile(
+        r"^/[A-Za-z0-9_-]{1,14}\.php(?:$|\?)", re.I)),
+
     ("recon", "reconnaissance", re.compile(
         r"^/(?:$|\?|robots\.txt|favicon\.ico|sitemap\.xml|index\.html?$)", re.I)),
 ]
@@ -130,6 +154,15 @@ def classify_path(path: str, method: str = "GET") -> Tuple[str, str]:
     """-> (technique, tactic). 'benign' and 'unknown' are both real answers."""
     if not path:
         return ("unknown", "unknown")
+    # A server treats //x and ///x as /x, so an anchored rule must too --
+    # otherwise "//0.php" evades the same rule that catches "/0.php", which is
+    # a free bypass for anyone who noticed.
+    #
+    # ONLY the path. Collapsing slashes across the whole string turned
+    # "/?x=php://input" into "/?x=php:/input" and silently un-matched the RCE
+    # rule -- the normalisation meant to close a bypass opened a bigger one.
+    _path, _sep, _query = path.partition("?")
+    path = re.sub(r"/{2,}", "/", _path) + _sep + _query
     if BENIGN.search(path):
         return ("benign", "none")
     for name, tactic, rx in TECHNIQUES:
@@ -335,7 +368,8 @@ def _score(a: Dict[str, Any], hostile: int) -> int:
         "ssrf-metadata": 50, "rce-attempt": 40, "webshell-probe": 35,
         "private-key-theft": 30,
         "path-traversal": 25, "secret-file-harvest": 15, "vcs-exposure": 12,
-        "ci-config-exposure": 10, "backup-hunt": 10, "cms-probe": 5,
+        "ci-config-exposure": 10, "backup-hunt": 10, "appliance-probe": 8,
+        "cms-probe": 5,
         "admin-discovery": 5, "info-disclosure": 5, "api-discovery": 3,
         "recon": 1,
     }

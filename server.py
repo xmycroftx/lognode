@@ -265,6 +265,68 @@ async def handle_instances(request: web.Request) -> web.Response:
     return web.json_response({"instances": names, "cached": False})
 
 
+
+async def handle_findings_list(request: web.Request) -> web.Response:
+    """Open findings, newest first, `new` at the top."""
+    import findings
+    try:
+        rows = await findings.list_findings(
+            pipeline.pg.pool,
+            state=request.query.get("state"),
+            kind=request.query.get("kind"),
+            limit=int(request.query.get("limit", 50)))
+        return web.json_response({"count": len(rows), "findings": rows}, dumps=_jdump)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_finding_get(request: web.Request) -> web.Response:
+    """One finding with its full evidence -- what a reviewer judges on."""
+    import findings
+    try:
+        row = await findings.get_finding(pipeline.pg.pool, int(request.match_info["id"]))
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if not row:
+        return web.json_response({"error": "no such finding"}, status=404)
+    return web.json_response(row, dumps=_jdump)
+
+
+async def handle_finding_verdict(request: web.Request) -> web.Response:
+    """Record a judgement. Recommended actions are recorded, never executed."""
+    import findings
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "expected a JSON body"}, status=400)
+    try:
+        row = await findings.submit_verdict(
+            pipeline.pg.pool,
+            finding_id=int(request.match_info["id"]),
+            verdict=body.get("verdict", ""),
+            rationale=body.get("rationale", ""),
+            reviewer=body.get("reviewer", "unknown"),
+            severity=body.get("severity"),
+            recommended_action=body.get("recommended_action"))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response({"ok": True, "finding": row}, dumps=_jdump)
+
+
+async def handle_findings_summary(request: web.Request) -> web.Response:
+    import findings
+    try:
+        return web.json_response(await findings.summary(pipeline.pg.pool), dumps=_jdump)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+def _jdump(obj) -> str:
+    """Timestamps and UUIDs are not JSON; say so in ISO rather than crashing."""
+    return json.dumps(obj, default=str)
+
 async def handle_threats(request: web.Request) -> web.Response:
     """Hostile traffic, clustered by technique and by actor fingerprint.
 
@@ -657,11 +719,95 @@ async def handle_loki_push(request: web.Request) -> web.Response:
         print(f"[LokiPush] Error processing batch: {e}")
         return web.Response(text=str(e), status=400)
 
+
+# Techniques that are worth a human's attention on a single occurrence, because
+# each one is an attempt at credentials or execution rather than enumeration.
+ESCALATE_ON = ("ssrf-metadata", "rce-attempt", "webshell-probe", "private-key-theft")
+FINDING_SCORE_FLOOR = int(os.environ.get("LOGNODE_FINDING_SCORE", "40"))
+FINDING_DECEPTION_FLOOR = int(os.environ.get("LOGNODE_FINDING_DECEPTION", "40"))
+FINDING_SWEEP_SECONDS = int(os.environ.get("LOGNODE_FINDING_SWEEP", "600"))
+
+
+def _worth_raising(actor: dict) -> str:
+    """-> reason, or '' to leave it alone.
+
+    Deliberately narrow. A queue that collects every scanner is a Discord
+    channel with extra steps, and the whole point is that a human reads this one.
+    """
+    techniques = actor.get("techniques") or {}
+    hit = [t for t in ESCALATE_ON if t in techniques]
+    if hit:
+        return "attempted " + ", ".join(hit)
+    if (actor.get("inconsistency") or 0) >= FINDING_DECEPTION_FLOOR:
+        return "claimed to be something it is not (inconsistency %d)" % actor["inconsistency"]
+    if (actor.get("score") or 0) >= FINDING_SCORE_FLOOR:
+        return "breadth of technique (score %d)" % actor["score"]
+    return ""
+
+
+async def findings_sweep():
+    """Periodically turn threat actors into findings awaiting triage."""
+    import findings as F
+    await asyncio.sleep(30)          # let ingest settle after a restart
+    while True:
+        try:
+            if pipeline.pg.pool:
+                rows = await pipeline.pg.query_logs(q="HTTP/1.1", since_s=3600, limit=5000)
+                if rows:
+                    import ttp
+                    view = ttp.build_threat_view(
+                        rows, is_internal=ttp.make_internal_check(pipeline.graph))
+                    actors = view.get("actors") or []
+                    if actors:
+                        try:
+                            import enrich, behaviour
+                            await asyncio.to_thread(enrich.enrich_actors, actors[:50])
+                            profiles = behaviour.profile(rows)
+                            for a in actors:
+                                prof = profiles.get(a["ip"]) or {}
+                                a["inconsistency"] = prof.get("inconsistency", 0)
+                                a["tells"] = prof.get("tells", [])
+                                a["user_agents"] = prof.get("user_agents", [])
+                        except Exception as exc:
+                            print("[Findings] enrichment during sweep failed: %s" % exc)
+                    raised = 0
+                    for a in actors:
+                        reason = _worth_raising(a)
+                        if not reason:
+                            continue
+                        await F.record(
+                            pipeline.pg.pool, kind="threat_actor", subject=a["ip"],
+                            instance=(a.get("targets") or ["unknown"])[0],
+                            severity_hint=("high" if any(t in a.get("techniques", {})
+                                                         for t in ESCALATE_ON) else "medium"),
+                            evidence={"reason": reason, **a})
+                        raised += 1
+                    if raised:
+                        print("[Findings] %d threat actor(s) awaiting triage" % raised)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            print("[Findings] sweep error: %s" % exc)
+        await asyncio.sleep(FINDING_SWEEP_SECONDS)
+
 async def main():
     loop = asyncio.get_running_loop()
 
     # Connect to PostgreSQL pool
     await pipeline.start()
+
+    # The findings table is created here rather than in the pipeline because a
+    # failure to create it must not stop ingest: losing triage is bad, losing
+    # the log pipeline is worse.
+    try:
+        import findings
+        if pipeline.pg.pool:
+            await findings.ensure_schema(pipeline.pg.pool)
+            print("[Findings] table ready")
+    except Exception as _exc:
+        print("[Findings] schema init failed (%s); triage queue unavailable" % _exc)
+
+    asyncio.create_task(findings_sweep())
 
     # WireGuard & Localhost interface binding (Option A security)
     bind_hosts_str = os.environ.get("LOGNODE_BIND_HOST", "127.0.0.1,127.0.0.1")
@@ -689,6 +835,10 @@ async def main():
     app.router.add_get("/query", handle_query)
     app.router.add_get("/search", handle_search_ui)
     app.router.add_get("/threats", handle_threats)
+    app.router.add_get("/findings", handle_findings_list)
+    app.router.add_get("/findings/summary", handle_findings_summary)
+    app.router.add_get("/findings/{id}", handle_finding_get)
+    app.router.add_post("/findings/{id}/verdict", handle_finding_verdict)
     app.router.add_get("/instances", handle_instances)
     app.router.add_get("/metrics", handle_metrics)
     app.router.add_get("/anomalies", handle_anomalies)
