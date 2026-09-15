@@ -110,7 +110,16 @@ async function load(){
   $('sub').textContent = 'scanning…';
   const d = await (await fetch('/threats?since='+since+'&format=json')).json();
 
-  $('sub').innerHTML = d.events_scanned.toLocaleString()+' requests scanned · <b>'+
+  // "scanned" alone is only honest when it equals what matched. When the query
+  // stopped short, the window label on this page describes more time than the
+  // numbers below it cover, so say so in the same breath as the count.
+  const scan = d.truncated
+    ? '<span style="color:var(--amber)" title="'+esc(d.truncation_note||'')+'">'+
+      d.events_scanned.toLocaleString()+' of '+d.events_matched.toLocaleString()+
+      ' requests scanned (most recent)</span>'
+    : d.events_scanned.toLocaleString()+' requests scanned';
+
+  $('sub').innerHTML = scan+' · <b>'+
     d.actor_count+'</b> actors · <b>'+d.campaign_count+'</b> campaigns · window '+esc(d.window)+
     (d.enriched ? ' · <span style="color:var(--text-dim)">ownership via '+esc(d.enrichment_source||'')+'</span>' : '') +
     (d.excluded_internal && d.excluded_internal.length

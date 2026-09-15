@@ -340,10 +340,14 @@ async def handle_threats(request: web.Request) -> web.Response:
     import ttp
 
     since = request.query.get("since", "24h")
+    # The default has to cover the widest window the page offers, or the widest
+    # window is the one that quietly shows the least. 7d is currently ~5.4k
+    # access lines; classification is linear and in-process, so headroom here
+    # costs a second of CPU, while the absence of it costs an actor.
     try:
-        limit = min(int(request.query.get("limit", 5000)), 20000)
+        limit = min(int(request.query.get("limit", 50000)), 200000)
     except ValueError:
-        limit = 5000
+        limit = 50000
 
     since_s = None
     mult = {"m": 60, "h": 3600, "d": 86400, "s": 1}
@@ -355,11 +359,26 @@ async def handle_threats(request: web.Request) -> web.Response:
     # Access lines are the source: HTTP/1.1 is in every one of them and the raw
     # column is trigram-indexed, so this stays cheap as the table grows.
     rows = await pipeline.pg.query_logs(q="HTTP/1.1", since_s=since_s, limit=limit)
+    matched = await pipeline.pg.count_logs(q="HTTP/1.1", since_s=since_s)
 
     view = ttp.build_threat_view(
         rows, is_internal=ttp.make_internal_check(pipeline.graph))
     view["window"] = since
+
+    # Scanned and matched are separate numbers, and the page shows both. They
+    # used to be one, and wrong: the engine clamped every query at 1000 rows no
+    # matter what the caller asked for, so a "24h" view was built from the most
+    # recent 1000 access lines -- six and a half hours of a twenty-four hour
+    # window -- and reported that as the scan. An actor quiet for a day did not
+    # appear, and nothing on the page distinguished that from an actor who was
+    # never there.
     view["events_scanned"] = len(rows)
+    view["events_matched"] = matched
+    view["truncated"] = len(rows) < matched
+    if view["truncated"]:
+        view["truncation_note"] = (
+            "showing the most recent %d of %d requests in this window; "
+            "raise ?limit= to widen it" % (len(rows), matched))
 
     # Ownership: ASN, network, country, PTR. Opt-out rather than opt-in, because
     # an unattributed address is barely worth showing -- but it IS an external

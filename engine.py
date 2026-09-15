@@ -648,7 +648,12 @@ class PostgresSink:
     # and reject the rest. Nothing here can close a jsonpath string literal.
     _SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:/@+-]{1,128}$")
 
-    async def query_logs(
+    # The furthest this will ever go in one statement. Not a policy knob -- the
+    # per-request ceiling belongs at the HTTP and MCP surfaces, where the caller
+    # is untrusted. This one exists only so a bug cannot ask for the whole table.
+    HARD_ROW_CAP = 200_000
+
+    def _build_filters(
         self,
         event: Optional[str] = None,
         instance: Optional[str] = None,
@@ -657,11 +662,13 @@ class PostgresSink:
         value: Optional[str] = None,
         kv: Optional[str] = None,
         since_s: Optional[int] = None,
-        limit: int = 50
-    ) -> List[Dict[str, Any]]:
-        if not self.pool:
-            return []
+    ):
+        """-> (where_clause, params).
 
+        Shared by query_logs and count_logs so the two cannot drift. A count
+        built from a second, hand-written WHERE would eventually disagree with
+        the rows it claims to be counting, and it would disagree silently.
+        """
         conditions = []
         params = []
 
@@ -716,7 +723,45 @@ class PostgresSink:
             conditions.append(f"timestamp >= NOW() - (${len(params)} * INTERVAL '1 second')")
 
         where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-        params.append(min(limit, 1000))
+        return where_clause, params
+
+    async def count_logs(self, **filters) -> int:
+        """How many rows MATCH, as opposed to how many were returned.
+
+        /threats asked for 5000 rows over 24h, silently received 1000, and
+        reported "1000 events scanned" -- so a 24-hour page was in fact showing
+        the most recent six and a half hours, with nothing on it saying so. The
+        row count is the only way the caller can tell the difference between
+        "that is all of it" and "that is where we stopped reading".
+
+        Measured at 52ms for a 7-day trigram-filtered count over 3.25M rows.
+        """
+        if not self.pool:
+            return 0
+        where_clause, params = self._build_filters(**filters)
+        async with self.pool.acquire() as conn:
+            return int(await conn.fetchval(
+                f"SELECT count(*) FROM log_events {where_clause}", *params))
+
+    async def query_logs(
+        self,
+        event: Optional[str] = None,
+        instance: Optional[str] = None,
+        source: Optional[str] = None,
+        q: Optional[str] = None,
+        value: Optional[str] = None,
+        kv: Optional[str] = None,
+        since_s: Optional[int] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        if not self.pool:
+            return []
+
+        where_clause, params = self._build_filters(
+            event=event, instance=instance, source=source, q=q,
+            value=value, kv=kv, since_s=since_s)
+
+        params.append(max(1, min(limit, self.HARD_ROW_CAP)))
         limit_param = f"${len(params)}"
 
         query = f"""

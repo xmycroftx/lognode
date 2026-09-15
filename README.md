@@ -215,6 +215,7 @@ python3 test_llm_backend.py      # both model wire formats, against a mock
 python3 test_ttp.py              # technique rules, clustering, self-exclusion
 python3 test_behaviour.py        # claim-vs-conduct scoring, and what must NOT fire
 python3 test_findings_policy.py  # what reaches a human, and what must not
+python3 test_query_limits.py     # the row limit asked for is the row limit used
 ```
 
 ## Status
