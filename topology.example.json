@@ -1,0 +1,75 @@
+{
+  "_comment": [
+    "Declared topology: the nodes and flows you assert SHOULD exist.",
+    "Copy to topology.json (gitignored) and describe your own fleet.",
+    "",
+    "Nothing here is required. With no topology.json the graph declares nothing",
+    "and every peer it observes becomes external:<ip> -- a legitimate way to",
+    "start: watch first, declare once you know what normal looks like.",
+    "",
+    "A node may list several addresses; all of them fold onto the one node, so",
+    "a host seen by its LAN address and its VPN address is still one host.",
+    "A declared edge with expected_min_rate > 0 is monitored for silence: if the",
+    "traffic stops, the edge goes SILENT and the node it feeds goes DEGRADED.",
+    "",
+    "'self' is the node id of the host running LogNode. Flows parsed out of",
+    "ingested logs are attributed to its service nodes (<self>:lognode,",
+    "<self>:dnsmasq), so it should match one of the node ids below."
+  ],
+
+  "self": "hub",
+
+  "nodes": [
+    { "id": "hub",
+      "name": "hub (log collector)",
+      "type": "server",
+      "ip": "10.0.0.10",
+      "ips": ["192.0.2.10", "127.0.0.1"],
+      "role": "Runs LogNode, Postgres and the local model" },
+
+    { "id": "hub:lognode",   "name": "LogNode (:9514)",   "type": "service", "role": "Ingest endpoint" },
+    { "id": "hub:postgres",  "name": "PostgreSQL",        "type": "service", "role": "Structured event store" },
+    { "id": "hub:dnsmasq",   "name": "dnsmasq (:53)",     "type": "service", "role": "Local resolver" },
+
+    { "id": "laptop",
+      "name": "laptop",
+      "type": "workstation",
+      "ip": "10.0.0.21",
+      "role": "Developer workstation shipping journald" },
+
+    { "id": "app-server",
+      "name": "app-server",
+      "type": "server",
+      "ip": "10.0.0.31",
+      "ips": ["198.51.100.31"],
+      "role": "Public application server" },
+
+    { "id": "gateway",
+      "name": "edge router",
+      "type": "gateway",
+      "ip": "10.0.0.1",
+      "role": "Default route and DHCP" },
+
+    { "id": "metrics-cloud",
+      "name": "Metrics Cloud",
+      "type": "cloud",
+      "role": "Hosted metrics/logs backend, rotating load-balancer addresses" }
+  ],
+
+  "edges": [
+    { "source": "laptop",     "target": "hub:lognode",  "protocol": "http",
+      "channel": "telemetry_ingest", "expected_min_rate": 1.0 },
+
+    { "source": "app-server", "target": "hub:lognode",  "protocol": "http",
+      "channel": "telemetry_ingest", "expected_min_rate": 1.0 },
+
+    { "source": "hub:lognode", "target": "hub:postgres", "protocol": "internal",
+      "channel": "event_persist", "expected_min_rate": 1.0 },
+
+    { "source": "hub", "target": "metrics-cloud", "protocol": "tcp",
+      "channel": "port_443" },
+
+    { "source": "laptop", "target": "gateway", "protocol": "dns",
+      "channel": "dns_query" }
+  ]
+}

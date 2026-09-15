@@ -1,0 +1,16 @@
+# site config and learned state -- never commit
+topology.json
+templates.json
+templates.runtime.json
+graph.state.json
+graph.state.json.tmp
+events.jsonl
+.env
+
+# runtime
+pgdata/
+pgdata.persistent/
+server.log
+__pycache__/
+*.pyc
+.venv/

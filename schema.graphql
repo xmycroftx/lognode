@@ -1,0 +1,124 @@
+"""
+LogNode Fleet Telemetry Domain Graph Schema
+Modeled according to the "Thinking in Graphs" design principles:
+Exposes fleet systems, topological dependencies, directed flows, and anomaly shifts.
+"""
+
+schema {
+  query: Query
+  subscription: Subscription
+}
+
+enum NodeType {
+  WORKSTATION
+  SERVER
+  SERVICE
+  GATEWAY
+  CLOUD
+  CLIENT
+  EXTERNAL
+}
+
+enum NodeStatus {
+  HEALTHY
+  DEGRADED
+  SURGING
+  OFFLINE
+  UNKNOWN
+}
+
+enum EdgeStatus {
+  HEALTHY
+  SURGING
+  STARVED
+  SILENT
+  NOVEL
+}
+
+enum ShiftType {
+  SILENT_LINK
+  NOVEL_EDGE
+  FLOW_SURGE
+  STARVATION
+  NODE_DEGRADED
+}
+
+enum ShiftSeverity {
+  CRITICAL
+  WARNING
+  NOTICE
+  INFO
+}
+
+type FleetSummary {
+  totalNodes: Int!
+  totalEdges: Int!
+  activeShifts: Int!
+  fleetStatus: NodeStatus!
+}
+
+type FleetNode {
+  id: ID!
+  name: String!
+  type: NodeType!
+  ip: String
+  role: String!
+  status: NodeStatus!
+  lastSeen: Float!
+  metadata: String
+  inboundEdges: [FleetEdge!]!
+  outboundEdges: [FleetEdge!]!
+}
+
+type FleetEdge {
+  id: ID!
+  source: FleetNode!
+  target: FleetNode!
+  protocol: String!
+  channel: String!
+  isDeclared: Boolean!
+  expectedMinRate: Float!
+  totalVolume: Int!
+  totalBytes: Int!
+  rate1m: Float!
+  bytes1m: Int!
+  bytesPerSec: Float!
+  strokeWidth: Int!
+  baseline15m: Float!
+  status: EdgeStatus!
+  lastSeen: Float!
+}
+
+type TopologyShift {
+  id: ID!
+  type: ShiftType!
+  severity: ShiftSeverity!
+  source: FleetNode!
+  target: FleetNode!
+  message: String!
+  rate1m: Float!
+  baseline15m: Float!
+  timestamp: Float!
+}
+
+type FleetGraph {
+  uptimeSeconds: Float!
+  summary: FleetSummary!
+  nodes: [FleetNode!]!
+  edges: [FleetEdge!]!
+  shifts: [TopologyShift!]!
+  mermaid: String!
+}
+
+type Query {
+  fleet: FleetGraph!
+  node(id: ID!): FleetNode
+  nodes(type: NodeType, status: NodeStatus): [FleetNode!]!
+  edges(status: EdgeStatus, source: ID, target: ID): [FleetEdge!]!
+  shifts(severity: ShiftSeverity): [TopologyShift!]!
+}
+
+type Subscription {
+  onTopologyShift: TopologyShift!
+  onEdgeRateUpdate(edgeId: ID!): FleetEdge!
+}
