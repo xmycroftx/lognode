@@ -294,15 +294,8 @@ async def handle_threats(request: web.Request) -> web.Response:
     # column is trigram-indexed, so this stays cheap as the table grows.
     rows = await pipeline.pg.query_logs(q="HTTP/1.1", since_s=since_s, limit=limit)
 
-    def _internal(ip: str) -> bool:
-        """Anything the topology can name is ours, by definition."""
-        try:
-            resolved = pipeline.graph.resolve_node_id(ip)
-            return bool(resolved) and not resolved.startswith("external:") and resolved != "unknown"
-        except Exception:
-            return False
-
-    view = ttp.build_threat_view(rows, is_internal=_internal)
+    view = ttp.build_threat_view(
+        rows, is_internal=ttp.make_internal_check(pipeline.graph))
     view["window"] = since
     view["events_scanned"] = len(rows)
 

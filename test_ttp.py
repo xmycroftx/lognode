@@ -108,6 +108,31 @@ check("internal addresses excluded from actors",
 check("exclusions are reported, not silent",
       len(v2["excluded_internal"]) == 3, str(v2["excluded_internal"]))
 
+# --- the internal check must not swallow strangers --------------------------
+class _FakeGraph:
+    """resolve_node_id returns the input unchanged for anything undeclared --
+    the real behaviour, and the reason the naive check excluded every actor."""
+    nodes = {"hub": object(), "laptop": object()}
+    _map = {"10.0.0.10": "hub", "192.0.2.21": "laptop"}
+
+    def resolve_node_id(self, ip):
+        return self._map.get(ip, ip)
+
+
+_is_int = ttp.make_internal_check(_FakeGraph())
+check("declared address is internal", _is_int("10.0.0.10") is True)
+check("declared address by node name is internal", _is_int("hub") is True)
+check("UNDECLARED address is NOT internal", _is_int("203.0.113.77") is False)
+check("an external:* id is not internal", _is_int("external:203.0.113.77") is False)
+check("a resolver that raises fails closed", ttp.make_internal_check(object())("1.2.3.4") is False)
+
+_v3 = ttp.build_threat_view(
+    [ev("203.0.113.77", "/.env"), ev("10.0.0.10", "/.env")],
+    is_internal=_is_int)
+check("stranger survives the exclusion, declared host does not",
+      [a["ip"] for a in _v3["actors"]] == ["203.0.113.77"]
+      and _v3["excluded_internal"] == ["10.0.0.10"], str(_v3["excluded_internal"]))
+
 # --- scoring ----------------------------------------------------------------
 broad = ttp._score({"techniques": {"secret-file-harvest": 1, "vcs-exposure": 1,
                                    "path-traversal": 1}, "targets": {"a"}}, 3)

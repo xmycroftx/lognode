@@ -171,6 +171,28 @@ def _event_to_hit(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "ts": ev.get("timestamp")}
 
 
+def make_internal_check(graph):
+    """-> is_internal(ip), true only for addresses a DECLARED node owns.
+
+    The obvious test is wrong and fails open in the dangerous direction:
+    resolve_node_id() returns the address UNCHANGED when nothing claims it, so
+    "resolved and not external: and not unknown" calls every unrecognised
+    address internal. That excluded every real actor and left the threat view
+    permanently, silently empty -- it read as "no attacks" rather than "broken".
+
+    Membership in graph.nodes is the only honest test: either the topology
+    names this address or it does not.
+    """
+    def is_internal(ip: str) -> bool:
+        try:
+            resolved = graph.resolve_node_id(ip)
+        except Exception:
+            return False
+        return (resolved in getattr(graph, "nodes", {})
+                and not str(resolved).startswith("external:"))
+    return is_internal
+
+
 def build_threat_view(events: List[Dict[str, Any]],
                       min_hits: int = 1,
                       is_internal=None) -> Dict[str, Any]:
