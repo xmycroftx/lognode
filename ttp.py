@@ -139,8 +139,28 @@ def classify_path(path: str, method: str = "GET") -> Tuple[str, str]:
 
 
 def parse_access(raw: str) -> Optional[Dict[str, str]]:
+    """Any supported access-log dialect -> {ip, method, path, status}.
+
+    This used to be the uvicorn pattern alone, so every nginx combined-format
+    line was silently dropped: 698 rows scanned, 3 actors found, and no error
+    anywhere. behaviour.py already parsed both dialects, which made the gap
+    invisible -- one module profiled traffic the other could not see.
+
+    One parser now, so a dialect either works everywhere or fails everywhere.
+    """
     m = ACCESS_RE.search(raw or "")
-    return m.groupdict() if m else None
+    if m:
+        return m.groupdict()
+    try:
+        import behaviour
+    except Exception:
+        return None
+    parsed = behaviour.parse_line(raw or "")
+    if not parsed:
+        return None
+    return {"ip": parsed["ip"], "method": parsed.get("method", "GET"),
+            "path": parsed.get("path", ""), "status": parsed.get("status", ""),
+            "sport": parsed.get("sport") or ""}
 
 
 def _event_to_hit(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:

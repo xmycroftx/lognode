@@ -108,6 +108,20 @@ check("internal addresses excluded from actors",
 check("exclusions are reported, not silent",
       len(v2["excluded_internal"]) == 3, str(v2["excluded_internal"]))
 
+# --- every dialect the profiler understands, the classifier must too --------
+NGINX = ('45.159.230.92 - - [15/Sep/2026:00:07:35 +0000] '
+         '"GET /.env HTTP/1.1" 404 162 "-" "Mozilla/5.0"')
+p_ng = ttp.parse_access(NGINX)
+check("parses an nginx combined line", p_ng and p_ng["ip"] == "45.159.230.92"
+      and p_ng["path"] == "/.env" and p_ng["status"] == "404", str(p_ng))
+_vng = ttp.build_threat_view([{"raw": NGINX, "labels": {"instance": "web"},
+                               "kv": {}, "timestamp": None}])
+check("an nginx-only line produces an actor", _vng["actor_count"] == 1,
+      "got=%d" % _vng["actor_count"])
+check("and is classified, not dumped in unknown",
+      _vng["technique_totals"].get("secret-file-harvest") == 1,
+      str(_vng["technique_totals"]))
+
 # --- the internal check must not swallow strangers --------------------------
 class _FakeGraph:
     """resolve_node_id returns the input unchanged for anything undeclared --
