@@ -36,6 +36,11 @@ traffic is matched against it. Undeclared peers become `external:<ip>`, declared
 links that go quiet are flagged SILENT, and `/graph/subgraph?ip=…` returns the
 connected neighbourhood of an address.
 
+**And hostile traffic is clustered by technique, not listed by address.**
+Addresses rotate daily; the tooling behind them walks the same paths from
+whatever address it has today. `/threats` names what was attempted and groups
+actors that attempted the same set.
+
 ---
 
 ## Quick start
@@ -58,6 +63,7 @@ Look at it:
 ```
 http://localhost:9514/search      search UI
 http://localhost:9514/dashboard   topology
+http://localhost:9514/threats     techniques and campaigns
 http://localhost:9514/query?ip=192.0.2.7
 http://localhost:9514/graph/subgraph?ip=192.0.2.7&depth=1
 ```
@@ -96,6 +102,33 @@ LOGNODE_LLM_API_KEY=...
 The format is inferred from the URL. Reasoning models that leave `content` empty
 and answer in `reasoning` / `reasoning_content` are handled on both paths.
 
+## Threat view
+
+`/threats?since=24h` classifies each request into a technique
+(`secret-file-harvest`, `private-key-theft`, `ssrf-metadata`, `rce-attempt`,
+`path-traversal`, `webshell-probe`, `vcs-exposure`, …), scores each actor, and
+clusters actors sharing a technique fingerprint into campaigns. `?format=json`
+for the data.
+
+Two settings decide whether it is useful or noise:
+
+```bash
+# Your real routes. Without this, every genuine user of an app with an
+# /accounts route is scored as an attacker.
+LOGNODE_BENIGN_PATHS='^/(?:accounts/|user/|static/|assets/)'
+```
+
+and the `is_internal` callable the endpoint passes to `build_threat_view()`,
+which is wired to the graph's resolver — anything your declared topology can
+name is excluded, and excluded addresses are *reported*, not silently dropped.
+Skip that and your own egress NAT shows up as an actor running an
+`admin-discovery` campaign, which is you opening your own admin page.
+
+Scoring weights breadth over volume: one address trying four techniques ranks
+above one address fetching `.env` two hundred times. The rules were written from
+observed traffic and tuned by re-reading what the classifier could not name; the
+unclassified share is reported so you can keep doing that on your own data.
+
 ## Collectors
 
 Optional, and plain enough to read in a sitting:
@@ -118,6 +151,7 @@ python3 test_graph_subgraph.py   # neighbourhood traversal, dangling edges
 python3 test_graph_aging.py      # external-node retirement rules
 python3 test_graph_persist.py    # snapshot round-trip
 python3 test_llm_backend.py      # both model wire formats, against a mock
+python3 test_ttp.py              # technique rules, clustering, self-exclusion
 ```
 
 ## Status
