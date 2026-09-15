@@ -51,6 +51,7 @@
         border-radius:999px;padding:1px 8px;margin:1px 3px 1px 0;font-size:11px;color:var(--text-muted)}
   .chip.hot{border-color:var(--rose);color:#fda4af}
   .paths{color:var(--text-dim);font-size:11px;margin-top:4px;word-break:break-all}
+  .tells{color:var(--amber);font-size:11px;margin-top:5px;line-height:1.7}
   .camp{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:9px;
         padding:12px 14px;margin-bottom:9px}
   .camp .fp{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px;color:var(--text-main)}
@@ -78,6 +79,9 @@
 
   <h2>Campaigns — actors running the same techniques</h2>
   <div id="campaigns"></div>
+
+  <h2>Networks — who owns the addresses</h2>
+  <div id="owners"></div>
 
   <h2>Actors</h2>
   <div id="actors"></div>
@@ -108,6 +112,7 @@ async function load(){
 
   $('sub').innerHTML = d.events_scanned.toLocaleString()+' requests scanned · <b>'+
     d.actor_count+'</b> actors · <b>'+d.campaign_count+'</b> campaigns · window '+esc(d.window)+
+    (d.enriched ? ' · <span style="color:var(--text-dim)">ownership via '+esc(d.enrichment_source||'')+'</span>' : '') +
     (d.excluded_internal && d.excluded_internal.length
       ? ' · <span style="color:var(--emerald)">'+d.excluded_internal.length+
         ' of our own addresses excluded ('+d.excluded_internal.join(', ')+')</span>' : '');
@@ -127,16 +132,30 @@ async function load(){
       '<br>'+c.actors.map(ipLink).join(' ')+'</div></div>').join('')
     || '<div class="empty">No address ran the same technique set as another in this window.</div>';
 
-  $('actors').innerHTML = '<table><thead><tr><th>score</th><th>address</th><th>hostile</th>'+
+  $('owners').innerHTML = (d.owners||[]).filter(o=>o.asn).slice(0,12).map(o=>
+    '<div class="camp"><div class="fp">'+
+      '<b>AS'+esc(o.asn)+'</b> '+esc(o.org||'')+
+      (o.country?' <span class="chip">'+esc(o.country)+'</span>':'')+
+    '</div><div class="who"><b>'+o.actor_count+'</b> address'+(o.actor_count>1?'es':'')+
+      ' · '+o.hits+' hostile requests'+
+      (o.prefixes&&o.prefixes.length?' · '+esc(o.prefixes.join(' ')):'')+
+      '<br>'+o.actors.map(ipLink).join(' ')+'</div></div>').join('')
+    || '<div class="empty">'+(d.enriched?'No ownership data returned.':'Ownership lookup disabled.')+'</div>';
+
+  $('actors').innerHTML = '<table><thead><tr><th>score</th><th>address</th><th>owner</th><th>hostile</th>'+
     '<th>targets</th><th>techniques &amp; sample paths</th></tr></thead><tbody>'+
     (d.actors||[]).slice(0,60).map(a=>
       '<tr><td class="score '+scoreClass(a.score)+'">'+a.score+'</td>'+
-      '<td>'+ipLink(a.ip)+'</td>'+
+      '<td>'+ipLink(a.ip)+(a.rdns?'<div class="paths">'+esc(a.rdns)+'</div>':'')+'</td>'+
+      '<td>'+(a.country?'<span class="chip">'+esc(a.country)+'</span>':'')+
+        (a.org?'<div class="paths">'+esc(a.org.slice(0,34))+'</div>':'')+'</td>'+
       '<td>'+a.hostile_hits+(a.benign_hits?' <span style="color:var(--text-dim)">(+'+a.benign_hits+' benign)</span>':'')+'</td>'+
       '<td>'+esc((a.targets||[]).join(', '))+'</td>'+
       '<td>'+Object.entries(a.techniques).map(([t,n])=>'<span class="chip'+
           (["critical","high"].includes(SEV[t])?' hot':'')+'">'+esc(t)+' '+n+'</span>').join('')+
-        '<div class="paths">'+esc((a.sample_paths||[]).slice(0,5).join('  '))+'</div></td></tr>').join('')+
+        '<div class="paths">'+esc((a.sample_paths||[]).slice(0,5).join('  '))+'</div>'+
+        ((a.tells&&a.tells.length)?'<div class="tells">'+a.tells.map(t=>'▸ '+esc(t)).join('<br>')+'</div>':'')+
+        '</td></tr>').join('')+
     '</tbody></table>';
 }
 

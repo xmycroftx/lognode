@@ -299,6 +299,48 @@ async def handle_threats(request: web.Request) -> web.Response:
     view["window"] = since
     view["events_scanned"] = len(rows)
 
+    # Ownership: ASN, network, country, PTR. Opt-out rather than opt-in, because
+    # an unattributed address is barely worth showing -- but it IS an external
+    # lookup, so it is bounded to the actors actually displayed and says so.
+    want_enrich = (request.query.get("enrich", "1") != "0"
+                   and os.environ.get("LOGNODE_ENRICH", "1") != "0")
+    if want_enrich and view.get("actors"):
+        try:
+            import enrich
+            top = view["actors"][:int(os.environ.get("LOGNODE_ENRICH_MAX", "200"))]
+            # to_thread, not inline: this is blocking socket and resolver I/O,
+            # and awaiting blocking work on the loop is what put 104 connections
+            # in the accept queue earlier in this project's life.
+            await asyncio.to_thread(enrich.enrich_actors, top)
+            view["owners"] = enrich.group_by_owner(top)
+            view["enriched"] = True
+            view["enrichment_source"] = "Team Cymru bulk whois + local resolver"
+        except Exception as exc:
+            # Never let attribution failure remove the finding.
+            print("[Threats] enrichment failed (%s); serving unenriched" % exc)
+            view["enriched"] = False
+    else:
+        view["enriched"] = False
+
+    # Claim vs conduct. Cadence, connection reuse and 404-persistence work on
+    # any access log; the User-Agent tells need a log that records one, which
+    # uvicorn's default does not -- see the note in behaviour.py.
+    try:
+        import behaviour
+        profiles = behaviour.profile(rows)
+        for a in view.get("actors", []):
+            prof = profiles.get(a["ip"])
+            if prof:
+                a["tells"] = prof["tells"]
+                a["inconsistency"] = prof["inconsistency"]
+                a["user_agents"] = prof["user_agents"]
+                a["peak_rate_per_s"] = prof["peak_rate_per_s"]
+                a["connections"] = prof["connections"]
+                a["longest_404_run"] = prof["longest_404_run"]
+        view["actors"].sort(key=lambda x: (-(x.get("inconsistency") or 0), -x["score"]))
+    except Exception as exc:
+        print("[Threats] behavioural profiling failed (%s)" % exc)
+
     if request.query.get("format") == "json" or "text/html" not in (request.headers.get("Accept") or ""):
         return web.json_response(view)
     if THREATS_FILE.exists():

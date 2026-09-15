@@ -129,6 +129,29 @@ above one address fetching `.env` two hundred times. The rules were written from
 observed traffic and tuned by re-reading what the classifier could not name; the
 unclassified share is reported so you can keep doing that on your own data.
 
+### Ownership and behaviour
+
+Actors are enriched with ASN, network, country, registry and reverse DNS, from
+Team Cymru's bulk whois — no API key, one TCP connection for the whole batch.
+Set `LOGNODE_ENRICH=0` to disable it; note that enriching sends the looked-up
+addresses to Cymru, so it is bounded to the actors displayed and cached (misses
+included) for `LOGNODE_ENRICH_TTL`.
+
+`behaviour.py` scores the gap between what a client **claims** and what it
+**does** — the Cliff Stoll question. A browser that gets a 200 and never fetches
+an asset rendered nothing; 114 requests on one keep-alive connection at 14/second
+is not reading; a User-Agent claiming a browser build from 2007 has fossilised
+because its author copied it once and never looked again.
+
+Deception is scored only where a claim exists to contradict, so `zgrab` and
+friends score zero however hostile they are — an honest scanner and a browser
+impersonator are different problems. Where no User-Agent is logged at all, the
+view says so rather than inferring innocence from absence.
+
+> The User-Agent tells need an access log that records one. uvicorn's default
+> format does not; nginx's combined format does. Both dialects are parsed, so
+> point it at whichever log has the claim.
+
 ## Collectors
 
 Optional, and plain enough to read in a sitting:
@@ -152,6 +175,7 @@ python3 test_graph_aging.py      # external-node retirement rules
 python3 test_graph_persist.py    # snapshot round-trip
 python3 test_llm_backend.py      # both model wire formats, against a mock
 python3 test_ttp.py              # technique rules, clustering, self-exclusion
+python3 test_behaviour.py        # claim-vs-conduct scoring, and what must NOT fire
 ```
 
 ## Status
