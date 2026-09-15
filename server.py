@@ -389,7 +389,11 @@ async def handle_threats(request: web.Request) -> web.Response:
     # uvicorn's default does not -- see the note in behaviour.py.
     try:
         import behaviour
-        profiles = behaviour.profile(rows)
+        # Feed the reverse DNS enrichment already resolved, so a crawler claim
+        # is verified rather than believed. Without it an actor fetching
+        # /.ssh/id_rsa while presenting Googlebot scores zero deception.
+        rdns_map = {a["ip"]: a.get("rdns") for a in view.get("actors", [])}
+        profiles = behaviour.profile(rows, rdns=rdns_map)
         for a in view.get("actors", []):
             prof = profiles.get(a["ip"])
             if prof:
@@ -720,31 +724,6 @@ async def handle_loki_push(request: web.Request) -> web.Response:
         return web.Response(text=str(e), status=400)
 
 
-# Techniques that are worth a human's attention on a single occurrence, because
-# each one is an attempt at credentials or execution rather than enumeration.
-ESCALATE_ON = ("ssrf-metadata", "rce-attempt", "webshell-probe", "private-key-theft")
-FINDING_SCORE_FLOOR = int(os.environ.get("LOGNODE_FINDING_SCORE", "40"))
-FINDING_DECEPTION_FLOOR = int(os.environ.get("LOGNODE_FINDING_DECEPTION", "40"))
-FINDING_SWEEP_SECONDS = int(os.environ.get("LOGNODE_FINDING_SWEEP", "600"))
-
-
-def _worth_raising(actor: dict) -> str:
-    """-> reason, or '' to leave it alone.
-
-    Deliberately narrow. A queue that collects every scanner is a Discord
-    channel with extra steps, and the whole point is that a human reads this one.
-    """
-    techniques = actor.get("techniques") or {}
-    hit = [t for t in ESCALATE_ON if t in techniques]
-    if hit:
-        return "attempted " + ", ".join(hit)
-    if (actor.get("inconsistency") or 0) >= FINDING_DECEPTION_FLOOR:
-        return "claimed to be something it is not (inconsistency %d)" % actor["inconsistency"]
-    if (actor.get("score") or 0) >= FINDING_SCORE_FLOOR:
-        return "breadth of technique (score %d)" % actor["score"]
-    return ""
-
-
 async def findings_sweep():
     """Periodically turn threat actors into findings awaiting triage."""
     import findings as F
@@ -762,7 +741,8 @@ async def findings_sweep():
                         try:
                             import enrich, behaviour
                             await asyncio.to_thread(enrich.enrich_actors, actors[:50])
-                            profiles = behaviour.profile(rows)
+                            profiles = behaviour.profile(
+                                rows, rdns={a["ip"]: a.get("rdns") for a in actors})
                             for a in actors:
                                 prof = profiles.get(a["ip"]) or {}
                                 a["inconsistency"] = prof.get("inconsistency", 0)
@@ -772,15 +752,17 @@ async def findings_sweep():
                             print("[Findings] enrichment during sweep failed: %s" % exc)
                     raised = 0
                     for a in actors:
-                        reason = _worth_raising(a)
+                        reason = F.should_raise(a)
                         if not reason:
                             continue
                         await F.record(
                             pipeline.pg.pool, kind="threat_actor", subject=a["ip"],
                             instance=(a.get("targets") or ["unknown"])[0],
                             severity_hint=("high" if any(t in a.get("techniques", {})
-                                                         for t in ESCALATE_ON) else "medium"),
-                            evidence={"reason": reason, **a})
+                                                         for t in F.ESCALATE_ON) else "medium"),
+                            evidence={"reason": reason,
+                                      "ruleset": getattr(ttp, "RULESET_VERSION", "?"),
+                                      **a})
                         raised += 1
                     if raised:
                         print("[Findings] %d threat actor(s) awaiting triage" % raised)

@@ -10,6 +10,7 @@ Every rule here was written from traffic actually observed against this fleet
 data it is not in this file, and `unknown` is a real answer rather than a
 catch-all that quietly swallows the interesting cases.
 """
+import hashlib
 import os
 import re
 from collections import defaultdict
@@ -131,6 +132,16 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
     ("recon", "reconnaissance", re.compile(
         r"^/(?:$|\?|robots\.txt|favicon\.ico|sitemap\.xml|index\.html?$)", re.I)),
 ]
+
+# A short hash of the rules themselves, recorded on every finding. Derived
+# rather than hand-maintained, because a version constant somebody forgets to
+# bump is worse than none: it asserts the label is current when it is not.
+# Triaging this queue turned up findings carrying a technique name from a rule
+# ordering that had already been corrected, with nothing to indicate it.
+RULESET_VERSION = hashlib.sha256(
+    "|".join(name + ":" + rx.pattern for name, _tactic, rx in TECHNIQUES).encode()
+).hexdigest()[:12]
+
 
 # Paths YOUR application genuinely serves. Hitting these is not an attack, and
 # counting them as one inflates every actor that merely used the site.

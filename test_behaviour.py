@@ -111,5 +111,37 @@ ka = [t for t in mx["tells"] if "ONE connection" in t]
 check("keep-alive tell is scoped to port-bearing requests only",
       ka and "12 of 24" in ka[0], str(ka))
 
+# --- crawler claims are verified, not believed ------------------------------
+GB = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+check("recognises a verifiable crawler claim", B.crawler_claim(GB) == "googlebot")
+check("a browser UA claims no crawler", B.crawler_claim(CHROME) is None)
+
+def _crawl(ip, ua, rdns, n=30):
+    evs = [ng(ip, "/.ssh/id_rsa", ua, t=i) for i in range(n)]
+    return B.profile(evs, rdns={ip: rdns})[ip]
+
+fake = _crawl("203.0.113.20", GB, None)
+check("Googlebot with no reverse DNS is contradicted", fake["crawler_verified"] is False)
+check("impersonating a whitelisted crawler scores high", fake["inconsistency"] >= 60,
+      "got=%d" % fake["inconsistency"])
+check("the tell names the missing reverse DNS",
+      any("no reverse DNS" in t for t in fake["tells"]))
+
+wrong = _crawl("203.0.113.21", GB, "host.example-hosting.ru")
+check("Googlebot from the wrong domain is contradicted", wrong["crawler_verified"] is False)
+check("the tell names what the PTR actually was",
+      any("example-hosting.ru" in t for t in wrong["tells"]))
+
+real = _crawl("66.249.66.1", GB, "crawl-66-249-66-1.googlebot.com")
+check("a genuine Googlebot verifies", real["crawler_verified"] is True)
+check("a genuine Googlebot scores zero deception", real["inconsistency"] == 0,
+      "got=%d" % real["inconsistency"])
+
+honest = _crawl("203.0.113.22", "Mozilla/5.0 zgrab/0.x", None)
+check("an honest non-crawler scanner still scores zero", honest["inconsistency"] == 0)
+check("an unverifiable bot is not punished for existing",
+      B.profile([ng("203.0.113.23", "/", "SemrushBot/7~bl", t=1)],
+                rdns={})["203.0.113.23"]["inconsistency"] == 0)
+
 print("  ---", "ALL PASS" if ok else "FAILURES PRESENT")
 raise SystemExit(0 if ok else 1)

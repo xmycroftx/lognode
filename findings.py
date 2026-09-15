@@ -18,6 +18,7 @@ silently dropped ICMP and a filter that excluded every attacker -- both of which
 looked completely correct from the inside.
 """
 import hashlib
+import os
 import json
 from typing import Any, Dict, List, Optional
 
@@ -170,3 +171,47 @@ async def summary(pool) -> Dict[str, Any]:
     return {"by_state": by_state,
             "awaiting_triage": by_state.get("new", 0),
             "oldest_untriaged": oldest}
+
+
+# --- escalation policy -----------------------------------------------------
+#
+# What is worth a human at all. Deliberately narrow: a queue that collects every
+# scanner is an alert channel with extra steps, and the point of this one is
+# that somebody actually reads it.
+
+# Worth a human on a SINGLE occurrence -- each is an attempt at credentials or
+# execution, and once is enough to want to know.
+ESCALATE_ON = ("ssrf-metadata", "rce-attempt", "private-key-theft")
+
+# Worth a human only in QUANTITY. These are enumeration: one /wp-login.php or
+# one /8.php is the background radiation of the internet. Raising a finding for
+# a single hit teaches you to skim, which is the failure this queue exists to
+# avoid -- and it happened, twice, before this threshold existed.
+ESCALATE_ON_REPEAT = ("webshell-probe", "cms-probe", "appliance-probe")
+
+REPEAT_THRESHOLD = int(os.environ.get("LOGNODE_FINDING_REPEAT", "3"))
+SCORE_FLOOR = int(os.environ.get("LOGNODE_FINDING_SCORE", "40"))
+DECEPTION_FLOOR = int(os.environ.get("LOGNODE_FINDING_DECEPTION", "40"))
+
+
+def should_raise(actor: Dict[str, Any]) -> str:
+    """-> reason to raise a finding, or '' to leave the actor alone."""
+    techniques = actor.get("techniques") or {}
+
+    hit = [t for t in ESCALATE_ON if t in techniques]
+    if hit:
+        return "attempted " + ", ".join(hit)
+
+    repeat = [t for t in ESCALATE_ON_REPEAT
+              if techniques.get(t, 0) >= REPEAT_THRESHOLD]
+    if repeat:
+        return "repeated %s" % ", ".join(
+            "%s x%d" % (t, techniques[t]) for t in repeat)
+
+    if (actor.get("inconsistency") or 0) >= DECEPTION_FLOOR:
+        return "claimed to be something it is not (inconsistency %d)" % actor["inconsistency"]
+
+    if (actor.get("score") or 0) >= SCORE_FLOOR:
+        return "breadth of technique (score %d)" % actor["score"]
+
+    return ""

@@ -60,8 +60,53 @@ def clf_time(when: str):
 CANDID_UA = re.compile(
     r"zgrab|masscan|nmap|nuclei|sqlmap|dirbuster|gobuster|wpscan|nikto"
     r"|python-requests|curl/|wget|go-http-client|libwww|httpx|scrapy"
-    r"|censys|shodan|internetmeasurement|paloaltonetworks|bot\b|spider|crawler",
+    r"|censys|shodan|internetmeasurement|paloaltonetworks|spider|crawler|bot\b",
     re.I)
+
+# Crawlers whose identity can be CHECKED, and the domains their addresses must
+# reverse-resolve into. Each operator documents this themselves; it is the
+# standard verification and it is why claiming one of these is a risk for an
+# impostor rather than free cover.
+VERIFIABLE_CRAWLERS = {
+    "googlebot":           (".googlebot.com", ".google.com"),
+    "google-inspectiontool": (".googlebot.com", ".google.com"),
+    "storebot-google":     (".googlebot.com", ".google.com"),
+    "bingbot":             (".search.msn.com",),
+    "adidxbot":            (".search.msn.com",),
+    "duckduckbot":         (".duckduckgo.com",),
+    "yandexbot":           (".yandex.ru", ".yandex.net", ".yandex.com"),
+    "baiduspider":         (".baidu.com", ".baidu.jp"),
+    "applebot":            (".applebot.apple.com", ".apple.com"),
+    "facebookexternalhit": (".fbsv.net", ".facebook.com"),
+    "petalbot":            (".petalsearch.com", ".aspiegel.com"),
+}
+
+
+def crawler_claim(ua: str):
+    """-> the verifiable crawler this UA claims to be, or None."""
+    low = (ua or "").lower()
+    for name in VERIFIABLE_CRAWLERS:
+        if name in low:
+            return name
+    return None
+
+
+def crawler_verdict(name: str, rdns):
+    """-> (ok, explanation).
+
+    ok is True (verified), False (contradicted) or None (cannot tell).
+    An ABSENT PTR is a failure, not an unknown: every operator in the table
+    above publishes reverse DNS for its crawlers precisely so this check works.
+    """
+    suffixes = VERIFIABLE_CRAWLERS.get(name) or ()
+    if not rdns:
+        return False, ("claims %s but the address has no reverse DNS -- every "
+                       "real one publishes it so this check can be made" % name)
+    host = str(rdns).lower().rstrip(".")
+    if any(host.endswith(sfx) for sfx in suffixes):
+        return True, ""
+    return False, ("claims %s but reverse DNS is %s, which is not %s"
+                   % (name, host, " or ".join(s.lstrip(".") for s in suffixes)))
 
 BROWSER_UA = re.compile(r"Mozilla/5\.0.*(?:Chrome/|Firefox/|Safari/|Edg/)", re.I)
 
@@ -129,8 +174,14 @@ def _ts(value) -> Optional[float]:
         return None
 
 
-def profile(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """-> {ip: profile}. One pass, grouped by client."""
+def profile(events: List[Dict[str, Any]],
+            rdns: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+    """-> {ip: profile}. One pass, grouped by client.
+
+    `rdns` maps ip -> hostname (or None). Supply it and crawler claims are
+    verified rather than believed; omit it and they are reported as
+    unverified rather than silently trusted.
+    """
     by_ip: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {"times": [], "ports": set(), "uas": set(), "paths": [],
                  "statuses": [], "protos": set(), "methods": set(),
@@ -166,10 +217,11 @@ def profile(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         if t:
             a["times"].append(t)
 
-    return {ip: _tells(ip, a) for ip, a in by_ip.items()}
+    rdns = rdns or {}
+    return {ip: _tells(ip, a, rdns.get(ip)) for ip, a in by_ip.items()}
 
 
-def _tells(ip: str, a: Dict[str, Any]) -> Dict[str, Any]:
+def _tells(ip: str, a: Dict[str, Any], rdns=None) -> Dict[str, Any]:
     times = sorted(a["times"])
     span = (times[-1] - times[0]) if len(times) > 1 else 0.0
     rate = (len(times) / span) if span > 0 else 0.0
@@ -202,7 +254,17 @@ def _tells(ip: str, a: Dict[str, Any]) -> Dict[str, Any]:
         if reason and not is_candid:
             tells.append(reason)
             break
-    if is_candid:
+    # A verifiable crawler claim is checked, not taken at face value.
+    claimed_crawler = next((c for c in (crawler_claim(u) for u in uas) if c), None)
+    crawler_ok = None
+    if claimed_crawler:
+        crawler_ok, why = crawler_verdict(claimed_crawler, rdns)
+        if crawler_ok is False:
+            tells.append(why)
+        elif crawler_ok is True:
+            tells.append("verified %s (reverse DNS confirms)" % claimed_crawler)
+
+    if is_candid and not claimed_crawler:
         tells.append("identifies itself as tooling (%s)" % uas[0][:60])
     if len(uas) > 1:
         tells.append("presented %d different User-Agents from one address" % len(uas))
@@ -248,8 +310,14 @@ def _tells(ip: str, a: Dict[str, Any]) -> Dict[str, Any]:
         "tells": tells,
         # Deception is the claim NOT matching the conduct. An honest scanner
         # scores zero here however hostile it is -- that is the point.
+        "claimed_crawler": claimed_crawler,
+        "crawler_verified": crawler_ok,
         "inconsistency": (_inconsistency(claims_browser, is_candid, got_page, a, rate, worst_404)
-                          + (30 if (claims_browser and not is_candid and _anachronistic(uas)) else 0)),
+                          + (30 if (claims_browser and not is_candid and _anachronistic(uas)) else 0)
+                          # Impersonating a whitelisted crawler outranks every
+                          # other tell here: it is a bid for privileged access
+                          # and the contradiction is objective, not inferred.
+                          + (60 if crawler_ok is False else 0)),
         "anachronistic_ua": bool(uas) and _anachronistic(uas),
     }
 

@@ -148,9 +148,18 @@ friends score zero however hostile they are — an honest scanner and a browser
 impersonator are different problems. Where no User-Agent is logged at all, the
 view says so rather than inferring innocence from absence.
 
+Crawler claims are **verified, not believed**. Eleven crawlers publish reverse
+DNS precisely so anyone can check them, so `Googlebot` from an address with no
+PTR — or a PTR that isn't `*.googlebot.com` — is contradicted and scores higher
+than any other tell. Found in live traffic: an address fetching `/.ssh/id_rsa`
+and `/secrets.json` while presenting `Googlebot/2.1`, previously scored **zero**
+because `bot` matched the honest-tooling list. Impersonating the one agent
+operators whitelist is a bid for privileged access, and it is checkable.
+
 > The User-Agent tells need an access log that records one. uvicorn's default
 > format does not; nginx's combined format does. Both dialects are parsed, so
-> point it at whichever log has the claim.
+> point it at whichever log has the claim. Crawler verification additionally
+> needs reverse DNS — pass `rdns={ip: hostname}` to `behaviour.profile()`.
 
 ## Triage, not alerting
 
@@ -205,6 +214,7 @@ python3 test_graph_persist.py    # snapshot round-trip
 python3 test_llm_backend.py      # both model wire formats, against a mock
 python3 test_ttp.py              # technique rules, clustering, self-exclusion
 python3 test_behaviour.py        # claim-vs-conduct scoring, and what must NOT fire
+python3 test_findings_policy.py  # what reaches a human, and what must not
 ```
 
 ## Status
