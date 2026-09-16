@@ -1252,8 +1252,12 @@ def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
         shift += 7
     return res, pos
 
-def _parse_loki_proto(data: bytes) -> list[tuple[str, list[str]]]:
-    """Decodes Loki PushRequest protobuf (streams -> labels, entries -> line) in pure Python."""
+def _parse_loki_proto(data: bytes) -> list[tuple[str, list[tuple[int, str]]]]:
+    """Decodes Loki PushRequest protobuf in pure Python.
+
+    -> [(labels, [(timestamp_ns, line), ...]), ...]. The timestamp used to be
+    discarded, which stamped every replayed entry with its arrival time.
+    """
     pos = 0
     streams = []
     while pos < len(data):
@@ -1279,6 +1283,7 @@ def _parse_loki_proto(data: bytes) -> list[tuple[str, list[str]]]:
                         elif s_num == 2:  # Entry
                             e_pos = 0
                             line = ""
+                            ts_ns = 0
                             while e_pos < len(s_chunk):
                                 e_key, e_pos = _read_varint(s_chunk, e_pos)
                                 e_num, e_wire = e_key >> 3, e_key & 0x7
@@ -1288,12 +1293,24 @@ def _parse_loki_proto(data: bytes) -> list[tuple[str, list[str]]]:
                                     e_pos += e_len
                                     if e_num == 2:  # line
                                         line = e_val.decode("utf-8", errors="replace")
+                                    elif e_num == 1:  # timestamp: Timestamp{seconds, nanos}
+                                        t_pos, secs, nanos = 0, 0, 0
+                                        while t_pos < len(e_val):
+                                            t_key, t_pos = _read_varint(e_val, t_pos)
+                                            if (t_key & 0x7) != 0:
+                                                break
+                                            t_val, t_pos = _read_varint(e_val, t_pos)
+                                            if (t_key >> 3) == 1:
+                                                secs = t_val
+                                            elif (t_key >> 3) == 2:
+                                                nanos = t_val
+                                        ts_ns = secs * 1_000_000_000 + nanos
                                 elif e_wire == 0:
                                     _, e_pos = _read_varint(s_chunk, e_pos)
                                 else:
                                     break
                             if line:
-                                entries.append(line)
+                                entries.append((ts_ns, line))
                     elif s_wire == 0:
                         _, s_pos = _read_varint(chunk, s_pos)
                     else:
@@ -1315,12 +1332,30 @@ def _parse_loki_labels(labels_str: str) -> dict:
     return labels
 
 async def handle_loki_push(request: web.Request) -> web.Response:
-    """Loki-compatible push endpoint (POST /loki/api/v1/push) supporting Snappy+Protobuf and JSON."""
+    """Loki-compatible push endpoint (POST /loki/api/v1/push): snappy+protobuf or JSON.
+
+    This used to return 204 before a single line was enqueued, spawning one
+    task per line into an unbounded backlog. A fleet-wide Alloy restart replays
+    up to twelve hours of journal per host, and at eleven hosts that already
+    pinned the sink queue at its 50,000 ceiling. It now sheds first and awaits
+    each line, so a slow sink is visible to the shipper as a slow response and
+    a full one as a 429 -- both of which loki.write retries with backoff, from
+    its own batch buffer (and WAL, if enabled). Other 4xx are dropped by the
+    client, so 400 stays reserved for a body that will never parse.
+    """
+    import ecs
+
+    # loki: shed BEFORE reading the body, so overload costs nothing to refuse.
+    shed = ecs.should_shed(pipeline.pg.queue.qsize(), pipeline.pg.queue.maxsize,
+                           pipeline.pg.pool is not None)
+    if shed:
+        return web.Response(status=shed, headers={"Retry-After": "5"},
+                            text="sink unavailable" if shed == 503 else "queue high water")
+
     try:
         content_type = request.headers.get("Content-Type", "").lower()
         content_encoding = request.headers.get("Content-Encoding", "").lower()
         raw_body = await request.read()
-
         if not raw_body:
             return web.Response(status=204)
 
@@ -1328,29 +1363,28 @@ async def handle_loki_push(request: web.Request) -> web.Response:
             if not cramjam:
                 return web.Response(text="cramjam not installed for snappy", status=500)
             buf = bytes(cramjam.snappy.decompress_raw(raw_body))
-            streams = _parse_loki_proto(buf)
-            for labels_str, entries in streams:
-                parsed_labels = _parse_loki_labels(labels_str)
-                for line in entries:
-                    asyncio.create_task(pipeline.ingest(line, extra_labels=parsed_labels))
-            return web.Response(status=204)
-
-        # Handle standard JSON format
-        if "json" in content_type:
+            batch = [(_parse_loki_labels(labels_str), entries)
+                     for labels_str, entries in _parse_loki_proto(buf)]
+        elif "json" in content_type:
             body = json.loads(raw_body.decode("utf-8"))
-            streams = body.get("streams", [])
-            for stream_obj in streams:
+            batch = []
+            for stream_obj in body.get("streams", []):
                 labels = stream_obj.get("stream", {})
-                values = stream_obj.get("values", [])
-                for val in values:
-                    if len(val) >= 2:
-                        asyncio.create_task(pipeline.ingest(val[1], extra_labels=labels))
-            return web.Response(status=204)
-
-        return web.Response(text="Unsupported media type", status=415)
+                entries = [(val[0], val[1]) for val in stream_obj.get("values", []) if len(val) >= 2]
+                batch.append((labels, entries))
+        else:
+            return web.Response(text="Unsupported media type", status=415)
     except Exception as e:
         print(f"[LokiPush] Error processing batch: {e}")
         return web.Response(text=str(e), status=400)
+
+    # await, never create_task: the awaiting IS the backpressure.
+    n = 0
+    for labels, entries in batch:
+        for ts_raw, line in entries:
+            await pipeline.ingest(line, extra_labels=labels, ts=ecs.loki_ns(ts_raw))
+            n += 1
+    return web.Response(status=204, headers={"X-LogNode-Accepted": str(n)})
 
 
 async def findings_sweep():

@@ -217,5 +217,12 @@ for bad, why in ((b"{not json", "malformed json"),
     except ecs.BadBatch:
         check("BadBatch raised for %s" % why, True)
 
+
+# --- Loki entry timestamps ----------------------------------------------------
+check("nanosecond string -> epoch seconds", ecs.loki_ns("1789516800123456789") == 1789516800.123456789)
+check("integer nanoseconds accepted", ecs.loki_ns(1789516800000000000) == 1789516800.0)
+check("zero is absent, not 1970", ecs.loki_ns("0") is None)
+check("garbage is None, not an exception", ecs.loki_ns("now") is None and ecs.loki_ns(None) is None)
+
 print("  ---", "ALL PASS" if ok else "FAILURES PRESENT")
 raise SystemExit(0 if ok else 1)

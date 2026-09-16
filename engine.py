@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 import asyncpg
 from graph import TrafficGraph
+import ecs
 from fields import normalize_fields
 
 # Imported at module scope on purpose. This was originally a deferred
@@ -1405,7 +1406,20 @@ class AsyncLogPipeline:
                               latency_us=0.0, ts=mapped.get("ts"))
         return {"status": "structured", "event": event}
 
-    async def ingest(self, line: str, extra_labels: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    async def ingest(self, line: str, extra_labels: Optional[Dict[str, str]] = None,
+                     ts: Optional[float] = None) -> Dict[str, Any]:
+        """`ts` is the line's own time, if the shipper supplied one.
+
+        Loki push carries a timestamp per entry, and an Alloy restart replays up
+        to twelve hours of journal in a few minutes. Without this every replayed
+        line was stamped with the minute it arrived, which is the misdating that
+        turned 486 backfilled lines into one apparent burst. The same asymmetric
+        clamp as the ECS path: the future is refused, age is kept.
+        """
+        if ts is not None:
+            ts, suspect = ecs.clamp_ts(ts)
+            if suspect is not None:
+                self.stats["ts_clamped"] = self.stats.get("ts_clamped", 0) + 1
         line = line.strip()
         if not line:
             return {"status": "empty"}
@@ -1460,7 +1474,8 @@ class AsyncLogPipeline:
                 kv=kv,
                 raw=line,
                 labels=extra_labels,
-                latency_us=round(t_match_us, 2)
+                latency_us=round(t_match_us, 2),
+                ts=ts
             )
             return {
                 "status": "matched",
@@ -1487,7 +1502,8 @@ class AsyncLogPipeline:
             kv={},
             raw=line,
             labels=extra_labels,
-            latency_us=round(t_match_us, 2)
+            latency_us=round(t_match_us, 2),
+            ts=ts
         )
 
         cluster_ready = self.clusterer.add(line)

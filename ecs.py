@@ -83,6 +83,18 @@ def parse_ts(value: Any) -> Optional[float]:
         return None
 
 
+def loki_ns(value: Any) -> Optional[float]:
+    """A Loki entry timestamp -- nanoseconds since the epoch, as a string in
+    the JSON push body or an integer pair in protobuf -- to epoch seconds."""
+    try:
+        ns = int(value)
+    except (TypeError, ValueError):
+        return None
+    if ns <= 0:
+        return None
+    return ns / 1e9
+
+
 def clamp_ts(ts: Optional[float], now: Optional[float] = None
              ) -> Tuple[Optional[float], Optional[float]]:
     """-> (timestamp_to_store, suspect_original).
