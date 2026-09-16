@@ -24,7 +24,12 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
     ("private-key-theft", "credential-access", re.compile(
         r"/\.ssh/|id_rsa|id_dsa|id_ecdsa|id_ed25519|authorized_keys"
         r"|\.pem$|\.ppk$|\.p12$|\.pfx$|/master\.key|/service-account[^/]*\.json"
-        r"|/key\.json|\.tfstate|\.(?:key|crt|cer|keystore|jks)$", re.I)),
+        r"|/key\.json|\.tfstate|\.(?:key|crt|cer|keystore|jks)$"
+        # Cloud service-account and key files by their conventional names --
+        # the second-largest family in the unclassified tail once the RCE
+        # probes were named. A gcp-key.json is a signed identity, not config.
+        r"|(?:^|/)(?:gcp|google(?!-services)|sa|keyfile|service-?account|serviceaccount)[^/]*\.json$"
+        r"|\.tfvars(?:\.json)?$", re.I)),
 
     # By far the dominant behaviour observed: environment and credential files,
     # tried under every framework's conventional directory. The no-leading-dot
@@ -45,13 +50,19 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
         # stack traces with database DSNs in them), IIS and Kubernetes config,
         # and the Firebase client config that names the project and API key.
         r"|/storage/logs/|laravel\.log|/error_log$|web\.config$"
-        r"|kubernetes\.ya?ml|google-services\.json|firebase[^/]*\.json", re.I)),
+        r"|kubernetes\.ya?ml|google-services\.json|firebase[^/]*\.json"
+        # provider configs and any application log. A log is a stack trace
+        # with a DSN in it; a config/anthropic.json is an API key.
+        r"|/config/(?:aws|azure|gcp|google|anthropic|openai)[^/]*\.json$"
+        r"|aws-exports\.js|\.log$|/logs?/", re.I)),
 
     # CI definitions leak registry tokens, deploy keys and internal hostnames.
     ("ci-config-exposure", "discovery", re.compile(
         r"Jenkinsfile|\.travis\.ya?ml|\.circleci|\.github/workflows"
         r"|\.drone\.ya?ml|buildspec\.ya?ml|Dockerfile$|/composer\.json"
-        r"|/package\.json|/Gemfile", re.I)),
+        r"|/package\.json|/Gemfile"
+        r"|cloudbuild\.ya?ml|azure-pipelines\.ya?ml|bitbucket-pipelines\.ya?ml"
+        r"|/values\.ya?ml|/Chart\.ya?ml|/skaffold\.ya?ml|/serverless\.ya?ml", re.I)),
 
     ("vcs-exposure", "discovery", re.compile(
         r"/\.git(?:/|$)|/\.svn(?:/|$)|/\.hg(?:/|$)|\.gitlab-ci\.ya?ml|/\.gitignore", re.I)),
@@ -69,7 +80,7 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
     # /fetch?url=... is SSRF and matched above; a bare /fetch, /proxy or /sse
     # is the probe that precedes it, and was landing in "unknown".
     ("proxy-probe", "discovery", re.compile(
-        r"^/(?:fetch|proxy|sse|relay|forward)(?:$|\?)", re.I)),
+        r"^/(?:fetch|proxy|relay|forward)(?:$|\?)", re.I)),
 
     # eval-stdin.php is CVE-2017-9841: PHPUnit's test helper evals the request
     # body, and it ships inside vendor/ on any Laravel or Composer app that
@@ -93,7 +104,16 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
     ("info-disclosure", "discovery", re.compile(
         r"phpinfo|/info(?:\.php)?$|/test\.php|server-status|server-info"
         r"|/actuator|/debug|\.DS_Store|phpmyadmin|/telescope|trace\.axd"
-        r"|/_profiler|/elmah", re.I)),
+        r"|/_profiler|/elmah"
+        r"|/_debugbar|/horizon(?:/|$)|/log-viewer|/nginx_status|/containers/json"
+        r"|/_ignition|/__clockwork|/rails/info", re.I)),
+
+    # Scanning for exposed MCP servers -- /mcp, /mcp-sse, /sse, /query on a
+    # host that serves none. Nobody had these on a wordlist a year ago; a
+    # reachable MCP endpoint is tool execution with whatever rights the server
+    # runs under, which is why it is its own technique and not "api-discovery".
+    ("mcp-probe", "discovery", re.compile(
+        r"^/(?:mcp(?:-sse)?|mcp/|\.well-known/mcp|sse|messages|query)(?:$|[/?])", re.I)),
 
     ("api-discovery", "discovery", re.compile(
         r"^/(?:graphql|api(?:$|/)|v[0-9]+/|swagger|openapi|\.well-known/)"

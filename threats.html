@@ -98,6 +98,7 @@ const SEV = {
   "path-traversal":"high", "secret-file-harvest":"high", "backup-hunt":"high",
   "vcs-exposure":"med", "ci-config-exposure":"med", "info-disclosure":"med",
   "cms-probe":"med", "admin-discovery":"med", "api-discovery":"low",
+  "mcp-probe":"med", "proxy-probe":"low", "appliance-probe":"med",
   "recon":"low", "unknown":"low"
 };
 const esc = s => String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");

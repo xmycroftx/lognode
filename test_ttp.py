@@ -65,7 +65,7 @@ for p in ["/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
 for p in ["/storage/logs/laravel.log", "/error_log", "/web.config",
           "/kubernetes.yml", "/google-services.json"]:
     check("harvest: %s" % p, tech(p) == "secret-file-harvest", tech(p))
-for p in ["/fetch", "/proxy", "/sse", "/proxy?x=1"]:
+for p in ["/fetch", "/proxy", "/proxy?x=1"]:
     check("bare relay endpoint is proxy-probe: %s" % p, tech(p) == "proxy-probe", tech(p))
 check("but /fetch?url=http:// is still SSRF, not proxy-probe",
       tech("/fetch?url=http%3A%2F%2F169.254.169.254/") == "ssrf-metadata")
@@ -74,6 +74,23 @@ check("ads.txt is benign", tech("/ads.txt") == "benign")
 check("ads.txt is benign even under a custom LOGNODE_BENIGN_PATHS (this file sets one)",
       "ads" not in os.environ.get("LOGNODE_BENIGN_PATHS", "") and tech("/ads.txt") == "benign")
 check("a legitimate /error page is not harvest", tech("/error") != "secret-file-harvest", tech("/error"))
+
+# --- the second tail: cloud keys, IaC, logs, debug surfaces, MCP -------------
+for p in ["/gcp-key.json", "/sa.json", "/keyfile.json", "/service-account.json",
+          "/terraform.tfvars.json", "/terraform.tfvars"]:
+    check("key file: %s" % p, tech(p) == "private-key-theft", tech(p))
+for p in ["/config/aws.json", "/config/anthropic.json", "/aws-exports.js",
+          "/app.log", "/logs/error.log", "/var/log/syslog"]:
+    check("harvest: %s" % p, tech(p) == "secret-file-harvest", tech(p))
+for p in ["/cloudbuild.yaml", "/azure-pipelines.yml", "/bitbucket-pipelines.yml", "/values.yaml"]:
+    check("ci/iac: %s" % p, tech(p) == "ci-config-exposure", tech(p))
+for p in ["/_debugbar/open", "/horizon/dashboard", "/log-viewer", "/nginx_status", "/containers/json"]:
+    check("debug surface: %s" % p, tech(p) == "info-disclosure", tech(p))
+for p in ["/mcp", "/mcp-sse", "/sse", "/query", "/mcp/", "/.well-known/mcp"]:
+    check("MCP probe: %s" % p, tech(p) == "mcp-probe", tech(p))
+check("/fetch?url= is still SSRF ahead of everything", tech("/fetch?url=http://x") == "ssrf-metadata")
+check("/api/ is still api-discovery, not mcp", tech("/api/v1/users") == "api-discovery")
+check("a .json under an app route is not a key file", tech("/data/products.json") != "private-key-theft", tech("/data/products.json"))
 
 check("webshell-probe", tech("/i.php") == "webshell-probe")
 check("info-disclosure", tech("/phpinfo.php") == "info-disclosure")
