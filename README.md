@@ -234,33 +234,24 @@ open, which matches a deployment bound to a private interface.
 
 ## Retention
 
-Off by default: an upgrade must not start deleting your data. Turn it on with a
-window that carries a unit:
+Thirty days by default. Override with a window that carries a unit, or disable
+it explicitly:
 
 ```bash
 LOGNODE_RETENTION=14d          # m, h, d or w; a bare number is refused
+LOGNODE_RETENTION=off          # keep everything (the table then grows forever)
 LOGNODE_RETENTION_SWEEP=600    # seconds between sweeps (default)
 ```
 
 Rows older than the window are removed in bounded batches over the timestamp
 index, so no statement holds a long transaction against the table's eight
 indexes. A value under one hour, or without a unit, stops startup -- a typo in
-a destructive setting should fail loudly, not quietly delete the table.
+a destructive setting should fail loudly, not quietly delete the wrong amount.
 
 Size the window from the arithmetic: at roughly 612 bytes per row all-in, a
 fleet of ~90 hosts at a few hundred lines a minute writes about 675 MB a day.
 `schema.sql` is the table definition and is applied at boot (`IF NOT EXISTS`
 throughout, so it is safe against an existing database).
-
-
-
-Optional, and plain enough to read in a sitting:
-
-* `netsnap.py` — a socket snapshot (`ss -tunp`) on a timer, recording which
-  process held a connection to which address. A snapshot deliberately, not
-  syscall auditing: it misses short-lived connections and costs almost nothing.
-* `unitwatch.py` — reports failed systemd units, with a heartbeat every sweep so
-  a dead collector is distinguishable from a healthy fleet.
 
 ## Requirements
 
