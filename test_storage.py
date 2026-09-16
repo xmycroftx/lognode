@@ -65,6 +65,20 @@ for short in ("30m", "59m"):
         check("%r is under the floor and refused" % short, True)
 check("exactly the floor is accepted", S.retention_window("60m") == 3600)
 
+# --- the default ---------------------------------------------------------------
+check("unset means the 30-day default, not forever",
+      S.configured_window({}) == 30 * 86400, S.configured_window({}))
+check("DEFAULT_RETENTION is itself a valid spec",
+      S.retention_window(S.DEFAULT_RETENTION) == 30 * 86400)
+check("an explicit off disables it", S.configured_window({"LOGNODE_RETENTION": "off"}) is None)
+check("an explicit value overrides the default",
+      S.configured_window({"LOGNODE_RETENTION": "7d"}) == 7 * 86400)
+try:
+    S.configured_window({"LOGNODE_RETENTION": "7"})
+    check("a bad value raises at startup rather than falling back", False, "fell back")
+except ValueError:
+    check("a bad value raises at startup rather than falling back", True)
+
 # --- retention_sql: bounded, parameterised, indexed -------------------------
 sql = S.retention_sql(20000)
 check("window is a bind parameter, not interpolated", "$1" in sql)

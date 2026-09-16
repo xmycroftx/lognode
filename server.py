@@ -1428,8 +1428,9 @@ async def main():
 
     asyncio.create_task(findings_sweep())
 
-    # Retention: off unless LOGNODE_RETENTION is set. A bad value raises here
-    # and stops startup, which is the right outcome for a destructive setting.
+    # Retention: 30d unless LOGNODE_RETENTION overrides it; "off" disables. A
+    # bad value raises here and stops startup, which is the right outcome for
+    # a destructive setting.
     window = schema.configured_window()
     if window:
         print("[Retention] enabled: rows older than %ds are removed every %ss"
@@ -1439,7 +1440,7 @@ async def main():
             sweep_s=int(os.environ.get("LOGNODE_RETENTION_SWEEP", "600")),
             batch_rows=int(os.environ.get("LOGNODE_RETENTION_BATCH", "20000"))))
     else:
-        print("[Retention] disabled (LOGNODE_RETENTION unset); the table grows forever")
+        print("[Retention] disabled (LOGNODE_RETENTION=off); the table grows forever")
 
     # WireGuard & Localhost interface binding (Option A security)
     bind_hosts_str = os.environ.get("LOGNODE_BIND_HOST", "127.0.0.1,127.0.0.1")

@@ -52,8 +52,12 @@ async def ensure_schema(pool) -> None:
 
 # --- retention ---------------------------------------------------------------
 #
-# Off unless LOGNODE_RETENTION is set. For a public repository that is the only
-# defensible default: an upgrade must not start deleting a stranger's data.
+# Thirty days unless LOGNODE_RETENTION says otherwise; "off" disables it. The
+# default is a real window rather than "forever" because forever is not a
+# retention policy, it is the absence of one, and on a RAM-backed database it
+# is the failure that arrives on a schedule. Thirty days is long enough that a
+# quarterly look-back still has the quarter's tail, and short enough that a
+# fleet an order of magnitude larger than this one fits the disk it has.
 #
 # Arithmetic for the reader deciding a value: at ~612 bytes per row all-in
 # (heap plus eight indexes), 92 hosts at this fleet's per-host rate produce
@@ -165,8 +169,15 @@ async def retention_loop(pool_of: Callable[[], Any], stats: Dict[str, Any],
         await asyncio.sleep(sweep_s)
 
 
-def configured_window() -> Optional[int]:
-    """The window from the environment, or None. Raises on a bad value, on
-    purpose: a misconfigured destructive setting should stop startup, not be
-    silently ignored until someone notices the disk."""
-    return retention_window(os.environ.get("LOGNODE_RETENTION"))
+DEFAULT_RETENTION = "30d"
+
+
+def configured_window(settings: Optional[Dict[str, str]] = None) -> Optional[int]:
+    """The window from the process settings, defaulting to DEFAULT_RETENTION.
+
+    None only when explicitly disabled (LOGNODE_RETENTION=off). Raises on a bad
+    value, on purpose: a misconfigured destructive setting should stop startup,
+    not be silently ignored until someone notices the disk.
+    """
+    src = os.environ if settings is None else settings
+    return retention_window(src.get("LOGNODE_RETENTION", DEFAULT_RETENTION))
