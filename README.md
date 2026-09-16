@@ -232,6 +232,24 @@ it happened, not the time it arrived; only a timestamp in the future (or before
 Set `LOGNODE_INGEST_TOKEN` to require the bearer token; unset, the endpoint is
 open, which matches a deployment bound to a private interface.
 
+## Streaming from Loki
+
+Already shipping to Grafana Cloud or a self-hosted Loki? Read it back out
+instead of adding a second shipper to every host:
+
+```bash
+LOKI_URL=https://logs-prod-000.grafana.net   LOKI_USER=<instance id>  LOKI_TOKEN=<logs:read token> \
+LOKI_QUERY='{job=~".+"}'  LOKI_MODE=auto  LOKI_START=1h  python3 loki_tail.py
+```
+
+`auto` polls `query_range` to fill any gap since the saved cursor, then holds
+the `/loki/api/v1/tail` WebSocket; if the socket drops it polls the gap and
+tails again. The cursor is persisted, so a restart resumes rather than starting
+at "now". Every entry is forwarded with its own timestamp, and LogNode's 429/503
+are treated as a hold, not a failure. Entries carry `via="loki"` -- do not run
+this alongside a direct dual-ship of the same hosts, or every line arrives
+twice.
+
 ## Retention
 
 Thirty days by default. Override with a window that carries a unit, or disable
@@ -282,6 +300,7 @@ python3 test_ecs.py              # ECS mapping: dotted and nested, status as str
 python3 test_templatizer.py      # the learning loop converges; a skeleton that will not learn backs off
 python3 test_names.py            # no module references a name that does not exist (needs pyflakes)
 python3 test_storage.py          # the schema is a no-op on a live database; retention cannot be misconfigured
+python3 test_loki_tail.py        # each entry once, with its own time; a 429 is a hold (mock Loki + mock LogNode)
 python3 test_query_limits.py     # the row limit asked for is the row limit used
 ```
 

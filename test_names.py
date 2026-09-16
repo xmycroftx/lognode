@@ -17,7 +17,7 @@ import sys
 
 MODULES = ["server.py", "engine.py", "findings.py", "ecs.py", "schema.py", "behaviour.py",
            "ttp.py", "graph.py", "fields.py", "enrich.py", "alert.py",
-           "mcp_server.py", "netsnap.py", "unitwatch.py"]
+           "mcp_server.py", "netsnap.py", "unitwatch.py", "loki_tail.py"]
 
 try:
     import pyflakes  # noqa: F401
