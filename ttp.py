@@ -246,17 +246,26 @@ def _event_to_hit(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     labels = ev.get("labels") or {}
     raw = ev.get("raw") or ""
 
-    ip = kv.get("client_ip") or kv.get("remote_ip") or kv.get("peer_ip") or kv.get("ip")
-    path = kv.get("path") or kv.get("url")
-    method = kv.get("method") or "GET"
-    status = str(kv.get("status") or kv.get("code") or "")
-
-    if not (ip and path):
-        parsed = parse_access(raw)
-        if not parsed:
-            return None
+    # If the raw text parses as an access line, it wins: an access line is its
+    # own ground truth. A learned template's field NAMES are the fallback's
+    # guesses -- the nginx rule it produced tagged the "/Sep/2026" inside the
+    # timestamp bracket as <PATH>, so kv.path was a date on 485 rows and every
+    # one of them classified as "unknown". The view read 21.8% unknown while
+    # the same lines re-parsed read 11%. kv is only consulted when the line is
+    # not an access line in a dialect we know, which is when it has something
+    # to add (an ECS event with a bare message, a template that captured
+    # fields from a format parse_access does not know).
+    parsed = parse_access(raw)
+    if parsed:
         ip, path = parsed["ip"], parsed["path"]
         method, status = parsed["method"], parsed["status"]
+    else:
+        ip = kv.get("client_ip") or kv.get("remote_ip") or kv.get("peer_ip") or kv.get("ip")
+        path = kv.get("path") or kv.get("url")
+        method = kv.get("method") or "GET"
+        status = str(kv.get("status") or kv.get("code") or "")
+        if not (ip and path):
+            return None
 
     return {"ip": ip, "path": path, "method": method, "status": status,
             "target": labels.get("instance", "unknown"),

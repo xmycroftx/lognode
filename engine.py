@@ -320,6 +320,10 @@ class HotPathMatcher:
 class SkeletonClusterer:
     """Masks high-entropy literals to cluster log lines into template buckets."""
     TIME_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\b")
+    # Common Log Format timestamps -- [16/Sep/2026:22:47:08 +0000] -- must be
+    # tagged BEFORE the path rule sees them, or "/Sep/2026" is tagged as a
+    # <PATH> and the learned rule captures a date under the name "path".
+    CLF_TIME_RE = re.compile(r"\[\d{2}/[A-Za-z]{3}/\d{4}:\d{2}:\d{2}:\d{2}(?:\s+[+-]\d{4})?\]")
     IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b")
     # Before HEX/ID/NUM, which would otherwise carve a MAC into an inconsistent
     # mix of tagged and literal octets -- d6 is an <ID>, 8a is not, cf is not --
@@ -350,6 +354,7 @@ class SkeletonClusterer:
 
     def skeleton(self, line: str) -> str:
         s = self.TIME_RE.sub("<TIME>", line)
+        s = self.CLF_TIME_RE.sub("<TIME>", s)
         s = self.IP_RE.sub("<IP>", s)
         s = self.MAC_RE.sub("<MAC>", s)
         s = self.HEX_RE.sub("<HEX>", s)
@@ -598,7 +603,7 @@ class OllamaTemplatizer:
             event_name = "shape_" + "_".join(seen[:4]) if seen else "unstructured_event"
 
         TAG_PATTERNS = {
-            "<TIME>": r"[\d-]+[T ][\d:.]+(?:Z|[+-]\d{2}:\d{2})?",
+            "<TIME>": r"(?:[\d-]+[T ][\d:.]+(?:Z|[+-]\d{2}:\d{2})?|\[\d{2}/[A-Za-z]{3}/\d{4}:\d{2}:\d{2}:\d{2}(?:\s+[+-]\d{4})?\])",
             "<IP>": r"(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?",
             "<HEX>": r"(?:0x)?[a-fA-F0-9]+",
             "<PATH>": r"(?:/[a-zA-Z0-9_\.\-]+)+",

@@ -203,5 +203,16 @@ multi = ttp._score({"techniques": {"recon": 1}, "targets": {"a", "b", "c"}}, 1)
 single = ttp._score({"techniques": {"recon": 1}, "targets": {"a"}}, 1)
 check("hitting several hosts scores higher than one", multi > single)
 
+
+# --- a learned template's field names are guesses; the line is the truth -----
+_bad = {"raw": '20.65.170.9 - - [16/Sep/2026:22:47:08 +0000] "GET /hudson HTTP/1.1" 404 134 "-" "zgrab/0.x"',
+        "kv": {"ip": "20.65.170.9", "path": "/Sep/2026", "num_6": "404"}, "labels": {"instance": "web"}}
+_hit = ttp._event_to_hit(_bad)
+check("kv.path is a date but the raw line wins", _hit is not None and _hit["path"] == "/hudson", _hit)
+check("...and the status comes from the line too", _hit["status"] == "404")
+_ecs = {"raw": "just a message", "kv": {"ip": "1.2.3.4", "path": "/.env", "status": "404"}, "labels": {}}
+check("kv is still used when the raw is not an access line",
+      (ttp._event_to_hit(_ecs) or {}).get("path") == "/.env")
+
 print("  ---", "ALL PASS" if ok else "FAILURES PRESENT")
 raise SystemExit(0 if ok else 1)

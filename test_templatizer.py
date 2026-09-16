@@ -78,6 +78,14 @@ macrule = T.synthesize_from_skeleton(S.skeleton(mac), [mac, mac2, mac])
 check("ssh_guard family yields a rule that matches both MACs",
       macrule is not None and matches(macrule, mac) and matches(macrule, mac2))
 
+# --- the nginx date is a <TIME>, not a <PATH> -------------------------------
+_clf = S.skeleton('20.65.170.9 - - [16/Sep/2026:22:47:08 +0000] "GET /hudson HTTP/1.1" 404 134 "-" "zgrab/0.x"')
+check("CLF timestamp skeletonizes as <TIME>", "<TIME>" in _clf and "<PATH>" not in _clf.split("]")[0], _clf)
+_r = T.synthesize_from_skeleton(_clf, nginx)
+check("the re-learned nginx rule matches the samples", _r is not None and all(matches(_r, l) for l in nginx))
+check("...and captures no field called path (the request is inside the quoted string)",
+      _r is not None and "?P<path>" not in _r.pattern, getattr(_r, "pattern", "")[:120])
+
 # --- the backoff: what stops the next unknown cause -----------------------
 base, cap = engine.SYNTH_BACKOFF_BASE, engine.SYNTH_BACKOFF_MAX
 check("first failure waits the base", engine.synth_backoff_seconds(1) == base)
