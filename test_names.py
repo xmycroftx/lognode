@@ -15,7 +15,7 @@ was never reached by any test because it needed a live server and a timer.
 import subprocess
 import sys
 
-MODULES = ["server.py", "engine.py", "findings.py", "ecs.py", "behaviour.py",
+MODULES = ["server.py", "engine.py", "findings.py", "ecs.py", "schema.py", "behaviour.py",
            "ttp.py", "graph.py", "fields.py", "enrich.py", "alert.py",
            "mcp_server.py", "netsnap.py", "unitwatch.py"]
 

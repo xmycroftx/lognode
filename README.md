@@ -232,7 +232,27 @@ it happened, not the time it arrived; only a timestamp in the future (or before
 Set `LOGNODE_INGEST_TOKEN` to require the bearer token; unset, the endpoint is
 open, which matches a deployment bound to a private interface.
 
-## Collectors
+## Retention
+
+Off by default: an upgrade must not start deleting your data. Turn it on with a
+window that carries a unit:
+
+```bash
+LOGNODE_RETENTION=14d          # m, h, d or w; a bare number is refused
+LOGNODE_RETENTION_SWEEP=600    # seconds between sweeps (default)
+```
+
+Rows older than the window are removed in bounded batches over the timestamp
+index, so no statement holds a long transaction against the table's eight
+indexes. A value under one hour, or without a unit, stops startup -- a typo in
+a destructive setting should fail loudly, not quietly delete the table.
+
+Size the window from the arithmetic: at roughly 612 bytes per row all-in, a
+fleet of ~90 hosts at a few hundred lines a minute writes about 675 MB a day.
+`schema.sql` is the table definition and is applied at boot (`IF NOT EXISTS`
+throughout, so it is safe against an existing database).
+
+
 
 Optional, and plain enough to read in a sitting:
 
@@ -260,6 +280,7 @@ python3 test_findings_policy.py  # what reaches a human, and what must not
 python3 test_ecs.py              # ECS mapping: dotted and nested, status as str, the two paths pinned together
 python3 test_templatizer.py      # the learning loop converges; a skeleton that will not learn backs off
 python3 test_names.py            # no module references a name that does not exist (needs pyflakes)
+python3 test_storage.py          # the schema is a no-op on a live database; retention cannot be misconfigured
 python3 test_query_limits.py     # the row limit asked for is the row limit used
 ```
 

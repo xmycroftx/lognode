@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from aiohttp import web
 from engine import AsyncLogPipeline
+import schema
 
 DASHBOARD_FILE = Path(__file__).parent / "dashboard.html"
 SEARCH_FILE = Path(__file__).parent / "search.html"
@@ -186,6 +187,21 @@ async def handle_metrics(request: web.Request) -> web.Response:
     lines.append("# TYPE lognode_queue_depth gauge")
     q_size = pipeline.pg.queue.qsize() if pipeline.pg else 0
     lines.append(f"lognode_queue_depth {q_size}")
+
+    # Loss and retention. Best-effort storage is a defensible design only
+    # while the losses are countable.
+    lines.append("# HELP lognode_dropped_no_pool_total Rows discarded because Postgres was unreachable")
+    lines.append("# TYPE lognode_dropped_no_pool_total counter")
+    lines.append(f"lognode_dropped_no_pool_total {getattr(pipeline.pg, 'dropped_no_pool', 0)}")
+    lines.append("# HELP lognode_dropped_flush_error_total Rows discarded when a flush batch failed")
+    lines.append("# TYPE lognode_dropped_flush_error_total counter")
+    lines.append(f"lognode_dropped_flush_error_total {getattr(pipeline.pg, 'dropped_flush_error', 0)}")
+    lines.append("# HELP lognode_retention_deleted_total Rows removed by the retention sweep")
+    lines.append("# TYPE lognode_retention_deleted_total counter")
+    lines.append(f"lognode_retention_deleted_total {pipeline.stats.get('retention_deleted_total', 0)}")
+    lines.append("# HELP lognode_retention_window_seconds Configured retention window (0 = disabled)")
+    lines.append("# TYPE lognode_retention_window_seconds gauge")
+    lines.append(f"lognode_retention_window_seconds {pipeline.stats.get('retention_window_s', 0)}")
 
     lines.append("# HELP lognode_cluster_buckets Active skeleton clustering buckets")
     lines.append("# TYPE lognode_cluster_buckets gauge")
@@ -1397,12 +1413,33 @@ async def main():
     try:
         import findings
         if pipeline.pg.pool:
+            # log_events first: findings can exist without it, but nothing
+            # else can. IF NOT EXISTS throughout, so this is a no-op on a
+            # database whose schema was applied by hand.
+            try:
+                await schema.ensure_schema(pipeline.pg.pool)
+                print("[Schema] log_events ready")
+            except Exception as exc:
+                print("[Schema] could not apply log_events DDL: %s" % exc)
             await findings.ensure_schema(pipeline.pg.pool)
             print("[Findings] table ready")
     except Exception as _exc:
         print("[Findings] schema init failed (%s); triage queue unavailable" % _exc)
 
     asyncio.create_task(findings_sweep())
+
+    # Retention: off unless LOGNODE_RETENTION is set. A bad value raises here
+    # and stops startup, which is the right outcome for a destructive setting.
+    window = schema.configured_window()
+    if window:
+        print("[Retention] enabled: rows older than %ds are removed every %ss"
+              % (window, os.environ.get("LOGNODE_RETENTION_SWEEP", "600")))
+        asyncio.create_task(schema.retention_loop(
+            lambda: pipeline.pg.pool, pipeline.stats, window,
+            sweep_s=int(os.environ.get("LOGNODE_RETENTION_SWEEP", "600")),
+            batch_rows=int(os.environ.get("LOGNODE_RETENTION_BATCH", "20000"))))
+    else:
+        print("[Retention] disabled (LOGNODE_RETENTION unset); the table grows forever")
 
     # WireGuard & Localhost interface binding (Option A security)
     bind_hosts_str = os.environ.get("LOGNODE_BIND_HOST", "127.0.0.1,127.0.0.1")
