@@ -67,6 +67,30 @@ POSTGRES_DSN = os.environ.get(
     "postgresql://lognode@localhost:5432/lognode",
 )
 
+# --- synthesis backoff --------------------------------------------------------
+#
+# A skeleton whose synthesis did not produce a promoted rule is not retried on
+# the next three samples. It used to be: the bucket refilled in about seventy
+# seconds and fired again, forever. Twelve hours of journal held 1,176 LLM
+# calls for 45 distinct skeletons; three of them accounted for 94%. The fixes
+# above remove the causes that were known. This is what stops the NEXT unknown
+# cause from doing the same thing, whatever it turns out to be.
+SYNTH_BACKOFF_BASE = int(os.environ.get("LOGNODE_SYNTH_BACKOFF", "600"))
+SYNTH_BACKOFF_MAX = int(os.environ.get("LOGNODE_SYNTH_BACKOFF_MAX", str(6 * 3600)))
+SYNTH_CONCURRENCY = int(os.environ.get("LOGNODE_SYNTH_CONCURRENCY", "2"))
+
+
+def synth_backoff_seconds(failures: int) -> float:
+    """Exponential from the base, capped. failures is 1 on the first miss."""
+    return float(min(SYNTH_BACKOFF_MAX, SYNTH_BACKOFF_BASE * (2 ** max(0, failures - 1))))
+
+
+def synth_should_skip(skel: str, backoff: Dict[str, Tuple[float, int]], now: float) -> bool:
+    """True while a skeleton is inside its backoff window."""
+    entry = backoff.get(skel)
+    return bool(entry) and now < entry[0]
+
+
 # Fraction of a line a regex must span to count as a match.
 # This MUST be the same value at validation time and at match time. When they
 # differed (validate 0.40 / match 0.70), any rule covering 40-69%% of a line
@@ -184,15 +208,31 @@ class HotPathMatcher:
             print(f"[HotPath] Error saving runtime templates: {e}")
 
     def add_rule(self, rule: TemplateRule) -> bool:
-        if rule.compile():
-            # Avoid duplicate rules
-            if any(r.pattern == rule.pattern or r.event == rule.event for r in self.rules):
-                return False
-            self.rules.insert(0, rule)
-            self.runtime_rules.insert(0, rule)
-            self.save_runtime()
-            return True
-        return False
+        """Add a learned rule. True only if it was actually added.
+
+        A duplicate is judged by PATTERN, never by event name. The fallback
+        names a rule from the first four words of its skeleton, so every
+        variant of a family -- process=docker-proxy, process=systemd-resolve
+        -- arrives with the same name. Rejecting on the name meant that once
+        one variant owned it, the rest of the family was unlearnable forever:
+        1,134 re-syntheses of a single netsnap skeleton in 24 hours, each one
+        producing a valid rule and each one discarded here without a word.
+        A colliding name gets a numeric suffix instead.
+        """
+        if not rule.compile():
+            return False
+        if any(r.pattern == rule.pattern for r in self.rules):
+            return False
+        taken = {r.event for r in self.rules}
+        if rule.event in taken:
+            n = 2
+            while "%s_%d" % (rule.event, n) in taken:
+                n += 1
+            rule.event = "%s_%d" % (rule.event, n)
+        self.rules.insert(0, rule)
+        self.runtime_rules.insert(0, rule)
+        self.save_runtime()
+        return True
 
     def sync_to_base(self, commit_to_git: bool = False) -> Dict[str, Any]:
         """Merges runtime templates into base templates.json and optionally commits to git."""
@@ -280,12 +320,27 @@ class SkeletonClusterer:
     """Masks high-entropy literals to cluster log lines into template buckets."""
     TIME_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\b")
     IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b")
-    HEX_RE = re.compile(r"\b(?:0x)?[a-f0-9]{6,64}\b", re.IGNORECASE)
+    # Before HEX/ID/NUM, which would otherwise carve a MAC into an inconsistent
+    # mix of tagged and literal octets -- d6 is an <ID>, 8a is not, cf is not --
+    # so every distinct address produced a distinct skeleton, and every one of
+    # them collided on the same rule name. 213 re-syntheses a day for ssh_guard.
+    MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}:){5,}[0-9a-fA-F]{2}\b")
+    # Must contain a letter. A run of 6+ digits is a pid, a size, an id -- a
+    # number -- and tagging it <HEX> because it happens to be hex-alphabet
+    # split every family by digit COUNT: pid=1200 was <NUM>, pid=475075 was
+    # <HEX>, two skeletons, two rules, and a misleading field name in kv.
+    HEX_RE = re.compile(r"\b(?:0x)?(?=[a-f0-9]*[a-f])[a-f0-9]{6,64}\b", re.IGNORECASE)
     PATH_RE = re.compile(r"(?:/[a-zA-Z0-9_\.\-]+){2,}")
     ID_RE = re.compile(r"\b[A-Za-z_]+[0-9]+[A-Za-z0-9_]*\b")
     NUM_RE = re.compile(r"\b\d+(?:\.\d+)?(?:ms|s|us|B|KB|MB|GB)?\b")
     STR_RE = re.compile(r'"[^"]*"|\'[^\']*\'')
     PREP_RE = re.compile(r"\b(from|to|at|in|by|on|for|user|zone|server|peer|host|session|client)\s+([A-Za-z0-9_\-\.]+)\b", re.IGNORECASE)
+    # key=value where the value is a bare word. Nothing above tags these: a
+    # word with no digit is not an <ID>, "process" is not a PREP_RE keyword,
+    # and "=" is not whitespace. So process=docker-proxy froze into a rule as a
+    # LITERAL and process=systemd-resolve -- 3,600 lines a day -- could never
+    # match it. Runs last so tagged values (local=<IP>) are left alone.
+    KV_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z][A-Za-z0-9_\-\.]*|-)(?=\s|$)")
 
     def __init__(self, cluster_threshold: int = 3, max_buckets: int = 2000):
         self.cluster_threshold = cluster_threshold
@@ -295,12 +350,14 @@ class SkeletonClusterer:
     def skeleton(self, line: str) -> str:
         s = self.TIME_RE.sub("<TIME>", line)
         s = self.IP_RE.sub("<IP>", s)
+        s = self.MAC_RE.sub("<MAC>", s)
         s = self.HEX_RE.sub("<HEX>", s)
         s = self.PATH_RE.sub("<PATH>", s)
         s = self.STR_RE.sub("<STR>", s)
         s = self.ID_RE.sub("<ID>", s)
         s = self.NUM_RE.sub("<NUM>", s)
         s = self.PREP_RE.sub(r"\1 <VAR>", s)
+        s = self.KV_RE.sub(r"\1=<VAR>", s)
         return s
 
     def add(self, line: str) -> Optional[Tuple[str, List[str]]]:
@@ -523,7 +580,21 @@ class OllamaTemplatizer:
             if len(w) > 1 and not w.isdigit()
             and w.lower() not in ("line", "info", "error", "warn", "warning", "to", "from", "at", "in", "by", "for", "the", "a", "an")
         ]
-        event_name = "_".join(words[:4]) if words else "unstructured_event"
+        if words:
+            event_name = "_".join(words[:4])
+        else:
+            # An all-tag skeleton -- the nginx access line is nothing but
+            # <IP> <NUM> <PATH> <STR> and punctuation -- has no words to name
+            # itself with. It used to be refused outright, AFTER building a
+            # regex that matched 3/3 samples at full coverage: a perfect rule
+            # thrown away for want of a name, 373 times a day, for the single
+            # most security-relevant line shape in the fleet. Name it by its
+            # shape instead.
+            seen = []
+            for t in re.findall(r"<([A-Z]+)>", skel):
+                if t.lower() not in seen:
+                    seen.append(t.lower())
+            event_name = "shape_" + "_".join(seen[:4]) if seen else "unstructured_event"
 
         TAG_PATTERNS = {
             "<TIME>": r"[\d-]+[T ][\d:.]+(?:Z|[+-]\d{2}:\d{2})?",
@@ -534,6 +605,7 @@ class OllamaTemplatizer:
             "<NUM>": r"\d+(?:\.\d+)?(?:ms|s|us|B|KB|MB|GB)?",
             "<ID>": r"[A-Za-z_]+[0-9]+[A-Za-z0-9_]*",
             "<VAR>": r"[A-Za-z0-9_\-\.]+",
+            "<MAC>": r"(?:[0-9a-fA-F]{2}:){5,}[0-9a-fA-F]{2}",
         }
 
         parts = re.split(r"(<[A-Z]+>)", skel)
@@ -556,7 +628,7 @@ class OllamaTemplatizer:
             print(f"[Templatizer] Skeleton regex compilation error: {e}")
             return None
 
-        if not words or event_name == "unstructured_event" or len(raw_regex.strip()) < 5:
+        if event_name == "unstructured_event" or len(raw_regex.strip()) < 5:
             return None
 
         match_count = 0
@@ -586,6 +658,10 @@ class PostgresSink:
         self.dsn = dsn
         self.pool: Optional[asyncpg.Pool] = None
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
+        # Loss counters. Both paths below already existed and both were silent;
+        # these only make them countable, and are exported on /metrics.
+        self.dropped_no_pool = 0
+        self.dropped_flush_error = 0
         self._worker_task: Optional[asyncio.Task] = None
         self.on_flush: Optional[Any] = None
 
@@ -597,15 +673,32 @@ class PostgresSink:
         except Exception as e:
             print(f"[Postgres] Warning: Could not connect to Postgres: {e}")
 
-    async def enqueue(self, event: str, kv: Dict[str, Any], raw: str, labels: Optional[Dict[str, Any]] = None, latency_us: Optional[float] = None):
+    async def enqueue(self, event: str, kv: Dict[str, Any], raw: str,
+                      labels: Optional[Dict[str, Any]] = None,
+                      latency_us: Optional[float] = None,
+                      ts: Optional[float] = None):
+        """Queue one row. `ts` is the event's OWN time, if it has one.
+
+        Callers that do not pass `ts` get the column default, so every existing
+        one is unaffected. Callers that do -- anything arriving from a shipper
+        with a queue in front of it -- get the time the event happened rather
+        than the time it reached us, which for a replayed backlog are hours
+        apart. Stamping ingest time on a replay is what made 486 backfilled
+        lines read as a single burst and invent cadence tells that never were.
+        """
         if not self.pool:
+            # Every line discarded here is discarded silently, and /ingest still
+            # answers "matched". Counting them is the difference between a
+            # deliberate best-effort design and an undetected outage.
+            self.dropped_no_pool += 1
             return
         await self.queue.put((
             event,
             json.dumps(labels or {}),
             json.dumps(kv or {}),
             latency_us,
-            raw
+            raw,
+            ts
         ))
 
     async def _flusher(self):
@@ -625,8 +718,9 @@ class PostgresSink:
                     async with self.pool.acquire() as conn:
                         await conn.executemany(
                             """
-                            INSERT INTO log_events (event, labels, kv, latency_us, raw)
-                            VALUES ($1, $2::jsonb, $3::jsonb, $4, $5)
+                            INSERT INTO log_events (event, labels, kv, latency_us, raw, timestamp)
+                            VALUES ($1, $2::jsonb, $3::jsonb, $4, $5,
+                                    COALESCE(to_timestamp($6::double precision), now()))
                             """,
                             batch
                         )
@@ -638,7 +732,12 @@ class PostgresSink:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[Postgres] Flusher error: {e}")
+                # The batch is gone -- there is no retry and no dead-letter. That
+                # is a deliberate best-effort choice, but an uncounted one is
+                # indistinguishable from a working system, so say how much.
+                self.dropped_flush_error += len(batch)
+                print(f"[Postgres] Flusher error ({len(batch)} rows dropped, "
+                      f"{self.dropped_flush_error} total): {e}")
                 await asyncio.sleep(0.5)
 
     # A value safe to splice into a jsonpath literal. jsonpath cannot be
@@ -662,6 +761,11 @@ class PostgresSink:
         value: Optional[str] = None,
         kv: Optional[str] = None,
         since_s: Optional[int] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        port: Optional[Any] = None,
+        process: Optional[str] = None,
+        network_only: bool = False,
     ):
         """-> (where_clause, params).
 
@@ -687,6 +791,9 @@ class PostgresSink:
         if q:
             params.append(f"%{q}%")
             conditions.append(f"raw ILIKE ${len(params)}")
+
+        if network_only:
+            conditions.append("(event LIKE 'netsnap%' OR (labels->>'source') = 'netsnap' OR event IN ('publickey_accepted', 'sshd_session', 'sshd', 'query_result', 'dnsmasq'))")
 
         # Find a value under ANY kv key, across every host.
         #
@@ -718,7 +825,25 @@ class PostgresSink:
                 f"kv @> jsonb_build_object(${len(params) - 1}::text, ${len(params)}::text)"
             )
 
-        if since_s:
+        if port is not None and str(port).strip():
+            port_str = str(port).strip()
+            params.append(port_str)
+            p_idx = len(params)
+            conditions.append(f"((kv->>'local_port') = ${p_idx} OR (kv->>'peer_port') = ${p_idx})")
+
+        if process:
+            params.append(process)
+            conditions.append(f"(kv->>'process') = ${len(params)}")
+
+        if start_time is not None:
+            params.append(float(start_time))
+            conditions.append(f"timestamp >= to_timestamp(${len(params)})")
+
+        if end_time is not None:
+            params.append(float(end_time))
+            conditions.append(f"timestamp <= to_timestamp(${len(params)})")
+
+        if since_s and start_time is None:
             params.append(since_s)
             conditions.append(f"timestamp >= NOW() - (${len(params)} * INTERVAL '1 second')")
 
@@ -752,6 +877,11 @@ class PostgresSink:
         value: Optional[str] = None,
         kv: Optional[str] = None,
         since_s: Optional[int] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        port: Optional[Any] = None,
+        process: Optional[str] = None,
+        network_only: bool = False,
         limit: int = 50
     ) -> List[Dict[str, Any]]:
         if not self.pool:
@@ -759,7 +889,8 @@ class PostgresSink:
 
         where_clause, params = self._build_filters(
             event=event, instance=instance, source=source, q=q,
-            value=value, kv=kv, since_s=since_s)
+            value=value, kv=kv, since_s=since_s, start_time=start_time,
+            end_time=end_time, port=port, process=process, network_only=network_only)
 
         params.append(max(1, min(limit, self.HARD_ROW_CAP)))
         limit_param = f"${len(params)}"
@@ -789,6 +920,37 @@ class PostgresSink:
 
     async def query_recent(self, event: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
         return await self.query_logs(event=event, limit=limit)
+
+    async def query_network_events(
+        self,
+        ip: Optional[str] = None,
+        port: Optional[Any] = None,
+        instance: Optional[str] = None,
+        process: Optional[str] = None,
+        protocol: Optional[str] = None,
+        since_s: Optional[int] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        limit: int = 1000
+    ) -> List[Dict[str, Any]]:
+        """Queries structured socket and network events across the fleet."""
+        event_filter = None
+        if protocol == "ssh":
+            event_filter = "publickey_accepted"
+        elif protocol == "dns":
+            event_filter = "query_result"
+        return await self.query_logs(
+            event=event_filter,
+            instance=instance,
+            value=ip,
+            port=port,
+            process=process,
+            since_s=since_s,
+            start_time=start_time,
+            end_time=end_time,
+            network_only=True,
+            limit=limit
+        )
 
     async def close(self):
         if self._worker_task:
@@ -1032,13 +1194,21 @@ class AsyncLogPipeline:
             channel="db_flush",
             count=count
         )
-        self._synthesis_sem = asyncio.Semaphore(2)
+        # Concurrency is a knob because the right value depends on the backend:
+        # 2 for an Ollama sharing this box's cores, more for a router fronting
+        # remote models. It is NOT the fix for a slow drain -- see the backoff.
+        self._synthesis_sem = asyncio.Semaphore(SYNTH_CONCURRENCY)
         self._in_flight_skeletons = set()
+        self._synth_backoff: Dict[str, Tuple[float, int]] = {}   # skel -> (retry_at, failures)
         self.stats = {
             "total_ingested": 0,
             "hot_path_matches": 0,
             "cold_path_buffered": 0,
-            "templates_synthesized": 0
+            "templates_synthesized": 0,
+            # Counted separately so the first number can be believed. It used
+            # to include every rule add_rule rejected -- 97.5% of them.
+            "templates_rejected": 0,
+            "synthesis_skipped_backoff": 0
         }
 
     async def start(self):
@@ -1055,6 +1225,9 @@ class AsyncLogPipeline:
         pass
 
     async def _async_synthesize_and_promote(self, skel: str, samples: List[str]):
+        if synth_should_skip(skel, self._synth_backoff, time.time()):
+            self.stats["synthesis_skipped_backoff"] += 1
+            return
         if skel in self._in_flight_skeletons:
             return
         self._in_flight_skeletons.add(skel)
@@ -1072,9 +1245,20 @@ class AsyncLogPipeline:
                 if not rule:
                     print(f"[AsyncWorker] LLM synthesis rejected/failed. Engaging deterministic skeleton fallback...")
                     rule = self.templatizer.synthesize_from_skeleton(skel, samples)
-                if rule:
-                    self.matcher.add_rule(rule)
+                added = bool(rule) and self.matcher.add_rule(rule)
+                if added:
                     self.stats["templates_synthesized"] += 1
+                    self._synth_backoff.pop(skel, None)
+                else:
+                    self.stats["templates_rejected"] += 1
+                    failures = self._synth_backoff.get(skel, (0.0, 0))[1] + 1
+                    wait = synth_backoff_seconds(failures)
+                    self._synth_backoff[skel] = (time.time() + wait, failures)
+                    print(f"[AsyncWorker] Not promoted ({'rejected by add_rule' if rule else 'no rule produced'}); "
+                          f"backing off {wait:.0f}s, failure #{failures}: {skel[:60]}...")
+                    if len(self._synth_backoff) > 5000:
+                        now = time.time()
+                        self._synth_backoff = {k: v for k, v in self._synth_backoff.items() if v[0] > now}
             finally:
                 self._in_flight_skeletons.discard(skel)
 
@@ -1151,41 +1335,83 @@ class AsyncLogPipeline:
         except Exception as exc:
             print("[UnitWatch] failed to dispatch alert for %s: %s" % (unit, exc))
 
+    @staticmethod
+    def _is_internal_noise(line: str, labels: Dict[str, Any]) -> bool:
+        """LogNode's own chatter, which it would otherwise ingest forever.
+
+        Extracted from ingest() so the structured path applies exactly the same
+        rule. Two copies of this list would diverge, and the failure would be a
+        self-amplifying feedback loop rather than a wrong answer -- LogNode
+        ships its own journal to itself, so anything it prints comes back in.
+        """
+        if (labels.get("unit", "") in ("lognode.service", "ollama.service")
+                or labels.get("user_unit", "") in ("lognode.service", "ollama.service")
+                or labels.get("syslog_identifier", "") in ("ollama", "lognode")
+                or labels.get("comm", "") in ("ollama", "llama-server")):
+            return True
+        if line.startswith((
+                "[AsyncWorker]", "[Templatizer]", "[HotPath]", "[Postgres]",
+                "[Network]", "[LokiPush]", "[GIN]", "[AnomalyDetector]", "[Graph]",
+                # A UnitWatch line quoting the offending log line re-triggers the
+                # rule that wrote it -- an observed, self-amplifying loop.
+                "[UnitWatch]",
+                "slot ", "srv ", "sampler params", "slot launch_slot_:")):
+            return True
+        if any(k in line for k in (
+                "dry_multiplier =", "repeat_last_n =", "mirostat =", "top_k =",
+                "n_ctx_slot =", "sampler chain:", "prompt cache update",
+                "init sampler, took", "launch_slot_:", "task.n_tokens",
+                "sampling params", "processing task")):
+            return True
+        return "com.apple.system.opendirectoryd" in line
+
+    async def ingest_structured(self, mapped: Dict[str, Any]) -> Dict[str, Any]:
+        """Ingest an event whose structure already exists. From ecs.map_event.
+
+        This deliberately skips the two most expensive things ingest() does, and
+        the skip is the feature rather than an optimisation:
+
+        - HotPathMatcher.match, a linear scan over ~1,400 compiled regexes. Its
+          cost grows with the template count, and the template count grows with
+          host diversity, so the matcher's ceiling FALLS as hosts are added.
+          Bypassing it makes the per-line cost independent of fleet size.
+        - SkeletonClusterer/the LLM templatizer. A miss here would cluster and,
+          at three samples, fire a synthesis whose promotion path does a
+          synchronous json.dump of the entire runtime template file on the event
+          loop. Re-deriving structure that arrived already-derived would be a
+          stability problem, not just wasted work.
+
+        Everything that makes a log line useful to the rest of LogNode still
+        runs: the noise filter, the anomaly detector, the traffic graph and the
+        sink. An operator will notice /templates stop growing under Logstash
+        traffic; that is intended, and the README says so.
+        """
+        raw = mapped.get("raw") or ""
+        labels = mapped.get("labels") or {}
+        if self._is_internal_noise(raw, labels):
+            return {"status": "filtered"}
+
+        self.stats["total_ingested"] += 1
+        self.stats["structured_ingested"] = self.stats.get("structured_ingested", 0) + 1
+
+        event = mapped.get("event") or "unstructured"
+        kv = mapped.get("kv") or {}
+        inst = labels.get("instance", "unknown")
+
+        self.anomaly_detector.record_event(instance=inst, event=event, raw=raw, kv=kv)
+        self.graph.observe_log(instance=inst, event=event, labels=labels, kv=kv,
+                               raw=raw, byte_count=len(raw.encode("utf-8")))
+        await self.pg.enqueue(event=event, kv=kv, raw=raw, labels=labels,
+                              latency_us=0.0, ts=mapped.get("ts"))
+        return {"status": "structured", "event": event}
+
     async def ingest(self, line: str, extra_labels: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         line = line.strip()
         if not line:
             return {"status": "empty"}
 
-        # Circuit breaker: Drop internal loop noise before ingestion/storage/synthesis
         labels = extra_labels or {}
-        unit = labels.get("unit", "")
-        user_unit = labels.get("user_unit", "")
-        syslog_id = labels.get("syslog_identifier", "")
-        comm = labels.get("comm", "")
-
-        is_internal_noise = (
-            unit in ("lognode.service", "ollama.service")
-            or user_unit in ("lognode.service", "ollama.service")
-            or syslog_id in ("ollama", "lognode")
-            or comm in ("ollama", "llama-server")
-            or line.startswith((
-                "[AsyncWorker]", "[Templatizer]", "[HotPath]", "[Postgres]",
-                "[Network]", "[LokiPush]", "[GIN]", "[AnomalyDetector]", "[Graph]",
-                # LogNode ships its own journal to itself, so anything it prints
-                # comes back through ingest(). Without this, a UnitWatch line
-                # quoting the offending log line re-triggers the rule that wrote
-                # it -- an observed, self-amplifying loop.
-                "[UnitWatch]",
-                "slot ", "srv ", "sampler params", "slot launch_slot_:"
-            ))
-            or any(k in line for k in (
-                "dry_multiplier =", "repeat_last_n =", "mirostat =", "top_k =",
-                "n_ctx_slot =", "sampler chain:", "prompt cache update", "init sampler, took",
-                "launch_slot_:", "task.n_tokens", "sampling params", "processing task"
-            ))
-            or "com.apple.system.opendirectoryd" in line
-        )
-        if is_internal_noise:
+        if self._is_internal_noise(line, labels):
             return {"status": "filtered", "reason": "internal_telemetry_loop"}
 
         self.stats["total_ingested"] += 1

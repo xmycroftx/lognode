@@ -1,7 +1,8 @@
 """
 LogNode Fleet Telemetry Domain Graph Schema
 Modeled according to the "Thinking in Graphs" design principles:
-Exposes fleet systems, topological dependencies, directed flows, and anomaly shifts.
+Exposes fleet systems, topological dependencies, directed flows, anomaly shifts,
+and interactive tool viewports (subgraph search, host data flows, time-lapse sequences).
 """
 
 schema {
@@ -62,10 +63,12 @@ type FleetNode {
   name: String!
   type: NodeType!
   ip: String
+  ips: [String!]
   role: String!
   status: NodeStatus!
   lastSeen: Float!
   metadata: String
+  hops: Int
   inboundEdges: [FleetEdge!]!
   outboundEdges: [FleetEdge!]!
 }
@@ -87,6 +90,8 @@ type FleetEdge {
   baseline15m: Float!
   status: EdgeStatus!
   lastSeen: Float!
+  port: Int
+  process: String
 }
 
 type TopologyShift {
@@ -110,12 +115,120 @@ type FleetGraph {
   mermaid: String!
 }
 
+type SubgraphResult {
+  querySummary: String!
+  nodes: [FleetNode!]!
+  edges: [FleetEdge!]!
+  shifts: [TopologyShift!]!
+  mermaid: String!
+  matchedLogs: [LogEvent!]!
+  totalFlows: Int!
+  totalVolume: Int!
+}
+
+type HostFlowSummary {
+  hostId: ID!
+  hostName: String!
+  inboundFlows: Int!
+  outboundFlows: Int!
+  inboundRate: Float!
+  outboundRate: Float!
+  inboundBytesPerSec: Float!
+  outboundBytesPerSec: Float!
+  activeProcesses: [String!]!
+}
+
+type HostFlowGraph {
+  host: FleetNode!
+  summary: HostFlowSummary!
+  nodes: [FleetNode!]!
+  edges: [FleetEdge!]!
+  mermaid: String!
+  recentLogs: [LogEvent!]!
+}
+
+type TimeLapseSlice {
+  sliceIndex: Int!
+  timestampStart: Float!
+  timestampEnd: Float!
+  timeLabel: String!
+  activeNodes: [FleetNode!]!
+  activeEdges: [FleetEdge!]!
+  newEdges: [FleetEdge!]!
+  totalVolume: Int!
+  bytesPerSec: Float!
+  mermaid: String!
+}
+
+type TimeLapseResult {
+  hostId: ID
+  since: String!
+  totalSlices: Int!
+  slices: [TimeLapseSlice!]!
+}
+
+type LogEvent {
+  id: ID!
+  timestamp: String!
+  event: String!
+  instance: String
+  source: String
+  latencyUs: Float
+  raw: String!
+  kvJson: String
+  labelsJson: String
+}
+
+type LogSearchResult {
+  count: Int!
+  queryTimeMs: Float!
+  events: [LogEvent!]!
+}
+
 type Query {
   fleet: FleetGraph!
   node(id: ID!): FleetNode
   nodes(type: NodeType, status: NodeStatus): [FleetNode!]!
   edges(status: EdgeStatus, source: ID, target: ID): [FleetEdge!]!
   shifts(severity: ShiftSeverity): [TopologyShift!]!
+
+  subgraph(
+    identifier: String
+    ip: String
+    port: Int
+    protocol: String
+    instance: String
+    process: String
+    status: EdgeStatus
+    depth: Int
+    since: String
+    limit: Int
+  ): SubgraphResult!
+
+  hostFlows(
+    host: ID!
+    since: String
+    limit: Int
+  ): HostFlowGraph!
+
+  timeLapse(
+    host: ID
+    ip: String
+    port: Int
+    since: String
+    slices: Int
+    limit: Int
+  ): TimeLapseResult!
+
+  searchLogs(
+    q: String
+    ip: String
+    port: Int
+    instance: String
+    event: String
+    since: String
+    limit: Int
+  ): LogSearchResult!
 }
 
 type Subscription {

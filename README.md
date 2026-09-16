@@ -190,6 +190,48 @@ out stays a human decision. An agent that can both judge and act on its own
 judgement has no check on it. A rationale is required, and verdicts outside the
 known set are refused — a judgement nobody can audit is worse than none.
 
+## Ingesting from Logstash
+
+If you already run Logstash, point its `http` output at LogNode and skip the
+learning pipeline entirely:
+
+```ruby
+output {
+  http {
+    url              => "http://lognode:9514/ingest/ecs"
+    http_method      => "post"
+    format           => "json_batch"
+    http_compression => true
+    headers          => { "Authorization" => "Bearer ${LOGNODE_TOKEN}" }
+    pool_max         => 8            # not the default 50: LogNode is one event loop
+    retry_failed     => true         # default; retries 429/5xx from Logstash's own queue
+  }
+}
+```
+
+ECS events arrive already structured, so they **bypass the template matcher and
+the LLM templatizer**. That is the point rather than a shortcut: the matcher is a
+linear scan whose cost grows with the template count, and the template count
+grows with host diversity, so its ceiling falls as hosts are added. Mapping
+straight from ECS makes the per-line cost independent of fleet size. `/templates`
+will not grow from Logstash traffic; that is intended.
+
+The status codes are the durability design. LogNode stays best-effort
+internally and returns **429** above its queue watermark and **503** when the
+database is unreachable -- both in Logstash's default `retryable_codes`, so the
+batch is held in Logstash's persistent queue and retried rather than dropped.
+Set `queue.type: persisted` in `logstash.yml` or that queue is memory only.
+A `400` (unparseable body) is deliberately not retryable; a poison batch
+returned as retryable is an infinite redelivery loop.
+
+An event keeps its own `@timestamp`. A replayed backlog is stored at the time
+it happened, not the time it arrived; only a timestamp in the future (or before
+2000) is replaced with ingest time, and the original is kept in
+`kv._ts_suspect`.
+
+Set `LOGNODE_INGEST_TOKEN` to require the bearer token; unset, the endpoint is
+open, which matches a deployment bound to a private interface.
+
 ## Collectors
 
 Optional, and plain enough to read in a sitting:
@@ -215,6 +257,9 @@ python3 test_llm_backend.py      # both model wire formats, against a mock
 python3 test_ttp.py              # technique rules, clustering, self-exclusion
 python3 test_behaviour.py        # claim-vs-conduct scoring, and what must NOT fire
 python3 test_findings_policy.py  # what reaches a human, and what must not
+python3 test_ecs.py              # ECS mapping: dotted and nested, status as str, the two paths pinned together
+python3 test_templatizer.py      # the learning loop converges; a skeleton that will not learn backs off
+python3 test_names.py            # no module references a name that does not exist (needs pyflakes)
 python3 test_query_limits.py     # the row limit asked for is the row limit used
 ```
 

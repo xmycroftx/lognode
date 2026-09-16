@@ -426,12 +426,91 @@ async def handle_threats(request: web.Request) -> web.Response:
     except Exception as exc:
         print("[Threats] behavioural profiling failed (%s)" % exc)
 
+    # Attach persistent campaign actor follow-up tags
+    if pipeline.pg and pipeline.pg.pool:
+        try:
+            import findings
+            saved_actors = await findings.list_campaign_actors(pipeline.pg.pool)
+            tag_map = {r["actor_id"]: r for r in saved_actors}
+            for c in view.get("campaigns", []):
+                aid = c.get("actor_id")
+                if aid and aid in tag_map:
+                    c["followup_tags"] = tag_map[aid].get("followup_tags") or []
+                    c["notes"] = tag_map[aid].get("notes") or ""
+                    db_fs = tag_map[aid].get("first_seen")
+                    if db_fs:
+                        db_fs_str = str(db_fs)
+                        if not c.get("first_seen") or db_fs_str < str(c["first_seen"]):
+                            c["first_seen"] = db_fs_str
+                else:
+                    c["followup_tags"] = []
+                    c["notes"] = ""
+            for a in view.get("actors", []):
+                aid = a.get("actor_id")
+                if aid and aid in tag_map:
+                    a["followup_tags"] = tag_map[aid].get("followup_tags") or []
+                    a["notes"] = tag_map[aid].get("notes") or ""
+                    db_fs = tag_map[aid].get("first_seen")
+                    if db_fs:
+                        db_fs_str = str(db_fs)
+                        if not a.get("first_seen") or db_fs_str < str(a["first_seen"]):
+                            a["first_seen"] = db_fs_str
+                else:
+                    a["followup_tags"] = []
+                    a["notes"] = ""
+        except Exception as exc:
+            print(f"[Threats] Failed to merge campaign followups: {exc}")
+
     if request.query.get("format") == "json" or "text/html" not in (request.headers.get("Accept") or ""):
         return web.json_response(view)
     if THREATS_FILE.exists():
         return web.Response(text=THREATS_FILE.read_text(encoding="utf-8"),
                             content_type="text/html")
     return web.json_response(view)
+
+async def handle_list_campaigns(request: web.Request) -> web.Response:
+    """Lists attributed campaign actors with long-term TTPs and follow-up tags."""
+    if not pipeline.pg or not pipeline.pg.pool:
+        return web.json_response({"error": "database not available"}, status=503)
+    import findings
+    try:
+        limit = min(int(request.query.get("limit", 100)), 500)
+    except ValueError:
+        limit = 100
+    rows = await findings.list_campaign_actors(pipeline.pg.pool, limit=limit)
+    return web.json_response({"campaign_actors": rows}, dumps=lambda x: json.dumps(x, default=str))
+
+async def handle_tag_campaign(request: web.Request) -> web.Response:
+    """Tags a campaign actor with follow-up directives and investigative notes."""
+    if not pipeline.pg or not pipeline.pg.pool:
+        return web.json_response({"error": "database not available"}, status=503)
+    actor_id = request.match_info.get("actor_id")
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "valid JSON body required"}, status=400)
+
+    tags = body.get("followup_tags") or body.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    notes = body.get("notes") or ""
+    codename = body.get("codename")
+    emoji = body.get("emoji")
+    fingerprint = body.get("fingerprint")
+    threat_tier = body.get("threat_tier")
+
+    import findings
+    row = await findings.tag_campaign_actor(
+        pipeline.pg.pool,
+        actor_id=actor_id,
+        followup_tags=tags,
+        notes=notes,
+        codename=codename,
+        emoji=emoji,
+        fingerprint=fingerprint,
+        threat_tier=threat_tier
+    )
+    return web.json_response({"status": "ok", "campaign_actor": row}, dumps=lambda x: json.dumps(x, default=str))
 
 async def handle_search_ui(request: web.Request) -> web.Response:
     """The search UI. The /query API has been usable from curl for a while and
@@ -442,29 +521,58 @@ async def handle_search_ui(request: web.Request) -> web.Response:
     return web.json_response({"error": "search.html not found"}, status=404)
 
 async def handle_graph_subgraph(request: web.Request) -> web.Response:
-    """The connected neighbourhood around an address, host, or node id.
+    """The connected neighbourhood or incident subgraph around an address, host, port, or protocol.
 
     /graph/subgraph?ip=127.0.0.1&depth=1
+    /graph/subgraph?port=443&since=1h&format=mermaid
     /graph/subgraph?node=vault-host&depth=2&format=mermaid
-
-    Pairs with /query?ip= : that one finds where an address appears in the log
-    index, this one finds what it is connected to in the topology.
     """
     if not hasattr(pipeline, "graph"):
         return web.json_response({"error": "graph not available"}, status=503)
 
     ident = request.query.get("ip") or request.query.get("node") or request.query.get("q")
-    if not ident:
-        return web.json_response(
-            {"error": "pass ip=, node= or q= -- an address, hostname or node id"},
-            status=400)
+    port = request.query.get("port")
+    protocol = request.query.get("protocol")
+    instance = request.query.get("instance") or request.query.get("host")
+    process = request.query.get("process")
+    status = request.query.get("status")
+    since = request.query.get("since") or "1h"
 
     try:
         depth = int(request.query.get("depth", 1))
     except ValueError:
         return web.json_response({"error": "depth must be an integer"}, status=400)
 
-    result = pipeline.graph.subgraph(ident, depth=depth)
+    from graphql_api import _parse_duration
+    since_s = _parse_duration(since)
+
+    historical_events = []
+    if pipeline.pg and (since_s or port or protocol or process or (ident and "." in ident)):
+        try:
+            historical_events = await pipeline.pg.query_network_events(
+                ip=ident if (ident and ("." in ident or ":" in ident)) else None,
+                port=port,
+                instance=instance or (ident if (ident and not "." in ident) else None),
+                process=process,
+                protocol=protocol,
+                since_s=since_s or 3600,
+                limit=1000
+            )
+        except Exception as e:
+            print(f"[Subgraph] Historical event query error: {e}")
+
+    result = pipeline.graph.search_subgraph(
+        identifier=ident,
+        ip=ident if (ident and "." in ident) else None,
+        port=port,
+        protocol=protocol,
+        instance=instance,
+        process=process,
+        status=status,
+        depth=depth,
+        since_s=since_s,
+        historical_events=historical_events
+    )
 
     fmt = request.query.get("format")
     if fmt == "mermaid":
@@ -473,13 +581,432 @@ async def handle_graph_subgraph(request: web.Request) -> web.Response:
     if fmt == "json":
         return web.json_response(result)
 
-    # A browser asking for this URL wants to SEE the neighbourhood. Returning
-    # mermaid source to a browser is technically an answer and practically a
-    # blank stare, so render it. Tools still get JSON: they send Accept: */*.
     if "text/html" in (request.headers.get("Accept") or ""):
         return web.Response(text=_subgraph_page(result),
                             content_type="text/html", charset="utf-8")
     return web.json_response(result)
+
+
+async def handle_graph_host_flows(request: web.Request) -> web.Response:
+    """Directed process-level data flow graph for a single host."""
+    if not hasattr(pipeline, "graph"):
+        return web.json_response({"error": "graph not available"}, status=503)
+
+    host = request.query.get("host") or request.query.get("node") or request.query.get("instance")
+    if not host:
+        return web.json_response({"error": "pass host= (e.g. hub, laptop, vault-host)"}, status=400)
+
+    since = request.query.get("since", "1h")
+    from graphql_api import _parse_duration
+    since_s = _parse_duration(since) or 3600
+
+    historical_events = []
+    if pipeline.pg:
+        try:
+            canon = pipeline.graph.resolve_node_id(host)
+            historical_events = await pipeline.pg.query_network_events(
+                instance=canon,
+                since_s=since_s,
+                limit=1000
+            )
+        except Exception as e:
+            print(f"[HostFlows] Error querying network events: {e}")
+
+    result = pipeline.graph.build_host_data_flow(
+        host=host,
+        since_s=since_s,
+        historical_events=historical_events
+    )
+
+    fmt = request.query.get("format")
+    if fmt == "mermaid":
+        return web.Response(text=result.get("mermaid", ""), content_type="text/plain", charset="utf-8")
+    return web.json_response(result)
+
+
+async def handle_graph_time_lapse(request: web.Request) -> web.Response:
+    """Discrete time-lapse graph sequence over a time window."""
+    if not hasattr(pipeline, "graph"):
+        return web.json_response({"error": "graph not available"}, status=503)
+
+    host = request.query.get("host") or request.query.get("instance")
+    ip = request.query.get("ip")
+    port = request.query.get("port")
+    since = request.query.get("since", "1h")
+    from graphql_api import _parse_duration
+    since_s = _parse_duration(since) or 3600
+
+    try:
+        slices = max(3, min(int(request.query.get("slices", 12)), 60))
+    except ValueError:
+        slices = 12
+
+    historical_events = []
+    if pipeline.pg:
+        try:
+            historical_events = await pipeline.pg.query_network_events(
+                instance=host,
+                ip=ip,
+                port=port,
+                since_s=since_s,
+                limit=2000
+            )
+        except Exception as e:
+            print(f"[TimeLapse] Error querying network events: {e}")
+
+    result = pipeline.graph.build_time_lapse(
+        host=host,
+        ip=ip,
+        port=port,
+        since_s=since_s,
+        slices=slices,
+        historical_events=historical_events
+    )
+    return web.json_response(result)
+
+
+async def handle_graphql_post(request: web.Request) -> web.Response:
+    """Executes GraphQL query/mutation from JSON payload."""
+    from graphql_api import graphql_engine
+    try:
+        payload = await request.json()
+    except Exception as e:
+        return web.json_response({"errors": [{"message": f"Invalid JSON payload: {e}"}]}, status=400)
+
+    query = payload.get("query")
+    if not query:
+        return web.json_response({"errors": [{"message": "Missing 'query' in GraphQL request."}]}, status=400)
+
+    variables = payload.get("variables")
+    operation_name = payload.get("operationName")
+
+    result = await graphql_engine.execute(
+        pipeline=pipeline,
+        query=query,
+        variables=variables,
+        operation_name=operation_name
+    )
+    return web.json_response(result)
+
+
+async def handle_graphql_get(request: web.Request) -> web.Response:
+    """Executes GraphQL query via GET query parameters, or serves interactive GraphQL IDE."""
+    from graphql_api import graphql_engine
+    accept = request.headers.get("Accept", "").lower()
+    is_html = "text/html" in accept or request.query.get("format") == "html"
+
+    query = request.query.get("query")
+    if not query:
+        if is_html:
+            return web.Response(text=_graphql_explorer_page(), content_type="text/html", charset="utf-8")
+        return web.json_response({"errors": [{"message": "Missing 'query' parameter."}]}, status=400)
+
+    vars_raw = request.query.get("variables")
+    variables = {}
+    if vars_raw:
+        try:
+            variables = json.loads(vars_raw)
+        except Exception:
+            pass
+
+    op_name = request.query.get("operationName")
+    result = await graphql_engine.execute(
+        pipeline=pipeline,
+        query=query,
+        variables=variables,
+        operation_name=op_name
+    )
+    return web.json_response(result)
+
+
+def _graphql_explorer_page() -> str:
+    """Interactive GraphQL console and schema explorer with visual diagram support."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LogNode GraphQL Interactive Explorer</title>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        window.mermaid = mermaid;
+        mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+    </script>
+    <style>
+        :root {
+            --bg-base: #0a0c10; --bg-surface: #11141c; --bg-card: #161b26;
+            --border: #242c3d; --accent-cyan: #38bdf8; --accent-blue: #3b82f6;
+            --text-main: #e2e8f0; --text-muted: #8b9bb4;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: var(--bg-base); color: var(--text-main);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+            display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+        }
+        header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 12px 20px; background: var(--bg-surface); border-bottom: 1px solid var(--border);
+        }
+        .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; }
+        .controls { display: flex; align-items: center; gap: 10px; }
+        .btn {
+            background: var(--accent-blue); color: #fff; border: none; padding: 6px 14px;
+            border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+            transition: opacity 0.15s;
+        }
+        .btn:hover { opacity: 0.85; }
+        .btn-outline { background: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); }
+        select {
+            background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border);
+            padding: 6px 10px; border-radius: 6px; font-size: 0.85rem;
+        }
+        .main-container {
+            display: grid; grid-template-columns: 1fr 1fr; flex: 1; overflow: hidden;
+        }
+        .pane {
+            display: flex; flex-direction: column; border-right: 1px solid var(--border);
+            height: 100%; overflow: hidden;
+        }
+        .pane-header {
+            padding: 8px 16px; background: var(--bg-surface); border-bottom: 1px solid var(--border);
+            font-size: 0.75rem; text-transform: uppercase; font-weight: 600; color: var(--text-muted);
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        textarea {
+            flex: 1; background: var(--bg-base); color: #38bdf8; font-family: "JetBrains Mono", monospace;
+            font-size: 13px; line-height: 1.5; padding: 14px; border: none; resize: none; outline: none;
+        }
+        .output-wrapper {
+            flex: 1; display: flex; flex-direction: column; overflow: hidden;
+        }
+        pre#json-output {
+            flex: 1; overflow: auto; padding: 14px; background: #0c0f17; color: #a7f3d0;
+            font-family: "JetBrains Mono", monospace; font-size: 12px; line-height: 1.4;
+        }
+        #diagram-preview {
+            display: none; flex: 1; overflow: auto; padding: 16px; background: var(--bg-card);
+            align-items: center; justify-content: center;
+        }
+        .tab-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px 8px; font-weight: 600; }
+        .tab-btn.active { color: var(--accent-cyan); border-bottom: 2px solid var(--accent-cyan); }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="brand">
+            <span>⚡</span>
+            <span>LogNode GraphQL Tool Viewport</span>
+        </div>
+        <div class="controls">
+            <select id="query-presets" onchange="loadPreset()">
+                <option value="subgraph">Preset: Incident Subgraph (Port 443 & 1h)</option>
+                <option value="hostFlows">Preset: Host Data Flows (hub)</option>
+                <option value="timeLapse">Preset: Time-Lapse Slices</option>
+                <option value="fleet">Preset: Fleet Summary & Graph</option>
+                <option value="searchLogs">Preset: Incident Log Search</option>
+            </select>
+            <button class="btn" onclick="runQuery()">▶ Execute Query</button>
+            <a href="/dashboard" class="btn btn-outline" style="text-decoration:none">📊 Open Viewport Dashboard</a>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <div class="pane">
+            <div class="pane-header">GraphQL Query</div>
+            <textarea id="query-input" spellcheck="false"></textarea>
+        </div>
+        <div class="output-wrapper">
+            <div class="pane-header">
+                <div>
+                    <button id="tab-json" class="tab-btn active" onclick="switchTab('json')">JSON Response</button>
+                    <button id="tab-diagram" class="tab-btn" onclick="switchTab('diagram')">Mermaid Diagram</button>
+                </div>
+                <span id="timing-status">Ready</span>
+            </div>
+            <pre id="json-output">// Click 'Execute Query' to evaluate against schema.graphql</pre>
+            <div id="diagram-preview"></div>
+        </div>
+    </div>
+
+    <script>
+        const PRESETS = {
+            subgraph: `query IncidentAnalysis {
+  subgraph(port: 443, since: "1h", depth: 1) {
+    querySummary
+    totalFlows
+    totalVolume
+    nodes {
+      id
+      name
+      type
+      status
+    }
+    edges {
+      id
+      source { id name }
+      target { id name }
+      protocol
+      rate1m
+      strokeWidth
+      status
+    }
+    mermaid
+    matchedLogs {
+      timestamp
+      instance
+      event
+      raw
+    }
+  }
+}`,
+            hostFlows: `query HostDataFlow {
+  hostFlows(host: "hub", since: "1h") {
+    summary {
+      hostId
+      hostName
+      inboundFlows
+      outboundFlows
+      inboundRate
+      outboundRate
+      activeProcesses
+    }
+    nodes { id name type }
+    edges { id protocol rate1m }
+    mermaid
+  }
+}`,
+            timeLapse: `query TemporalTimeLapse {
+  timeLapse(since: "1h", slices: 6) {
+    totalSlices
+    since
+    slices {
+      sliceIndex
+      timeLabel
+      totalVolume
+      bytesPerSec
+      activeNodes { id }
+      newEdges { id protocol }
+      mermaid
+    }
+  }
+}`,
+            fleet: `query FleetOverview {
+  fleet {
+    uptimeSeconds
+    summary {
+      totalNodes
+      totalEdges
+      activeShifts
+      fleetStatus
+    }
+    nodes {
+      id
+      name
+      type
+      ip
+      status
+    }
+    shifts {
+      type
+      severity
+      message
+    }
+    mermaid
+  }
+}`,
+            searchLogs: `query IncidentLogs {
+  searchLogs(q: "netsnap", since: "1h", limit: 10) {
+    count
+    queryTimeMs
+    events {
+      id
+      timestamp
+      instance
+      event
+      raw
+      kvJson
+    }
+  }
+}`
+        };
+
+        let lastResult = null;
+
+        function loadPreset() {
+            const key = document.getElementById('query-presets').value;
+            document.getElementById('query-input').value = PRESETS[key] || '';
+        }
+
+        async function runQuery() {
+            const query = document.getElementById('query-input').value.trim();
+            const statusEl = document.getElementById('timing-status');
+            statusEl.textContent = 'Executing...';
+            const t0 = performance.now();
+
+            try {
+                const res = await fetch('/graphql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query })
+                });
+                const data = await res.json();
+                const ms = (performance.now() - t0).toFixed(1);
+                statusEl.textContent = `Completed in ${ms} ms`;
+                lastResult = data;
+                document.getElementById('json-output').textContent = JSON.stringify(data, null, 2);
+
+                // Check for mermaid in response
+                let mermaidCode = null;
+                if (data.data) {
+                    for (const key of Object.keys(data.data)) {
+                        if (data.data[key] && data.data[key].mermaid) {
+                            mermaidCode = data.data[key].mermaid;
+                            break;
+                        }
+                    }
+                }
+
+                if (mermaidCode && window.mermaid) {
+                    try {
+                        const { svg } = await window.mermaid.render('preview-svg-' + Date.now(), mermaidCode);
+                        document.getElementById('diagram-preview').innerHTML = svg;
+                    } catch (me) {
+                        document.getElementById('diagram-preview').innerHTML = '<pre style="color:#ef4444">' + me + '</pre>';
+                    }
+                }
+            } catch (err) {
+                statusEl.textContent = 'Failed';
+                document.getElementById('json-output').textContent = 'Error: ' + err.message;
+            }
+        }
+
+        function switchTab(tab) {
+            const jsonOut = document.getElementById('json-output');
+            const diagOut = document.getElementById('diagram-preview');
+            const tabJson = document.getElementById('tab-json');
+            const tabDiag = document.getElementById('tab-diagram');
+
+            if (tab === 'json') {
+                jsonOut.style.display = 'block';
+                diagOut.style.display = 'none';
+                tabJson.className = 'tab-btn active';
+                tabDiag.className = 'tab-btn';
+            } else {
+                jsonOut.style.display = 'none';
+                diagOut.style.display = 'flex';
+                tabJson.className = 'tab-btn';
+                tabDiag.className = 'tab-btn active';
+            }
+        }
+
+        window.onload = () => {
+            loadPreset();
+        };
+    </script>
+</body>
+</html>
+"""
 
 
 def _subgraph_page(result: dict) -> str:
@@ -551,26 +1078,33 @@ async def handle_graph_shifts(request: web.Request) -> web.Response:
         })
     return web.json_response({"error": "Graph engine not initialized"}, status=503)
 
+async def handle_dashboard(request: web.Request) -> web.Response:
+    """Serves the LogNode Environment Viewport dashboard."""
+    if DASHBOARD_FILE.exists():
+        html = DASHBOARD_FILE.read_text(encoding="utf-8")
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+        )
+    return web.Response(text="Dashboard file not found", status=404)
+
 async def handle_graph_mermaid(request: web.Request) -> web.Response:
-    """Returns dynamic Mermaid flowchart or interactive Workstation Telemetry Inspector dashboard."""
+    """Returns dynamic Mermaid flowchart diagram as plain text."""
     if not hasattr(pipeline, "graph"):
         return web.Response(text="Graph engine not initialized", status=503)
 
     fmt = request.query.get("format", "").lower()
-    accept = request.headers.get("Accept", "").lower()
-    is_html = (
-        fmt == "html"
-        or "text/html" in accept
-        or request.path in ("/dashboard", "/ui")
-    )
-
-    if is_html:
-        if DASHBOARD_FILE.exists():
-            html = DASHBOARD_FILE.read_text(encoding="utf-8")
-            return web.Response(text=html, content_type="text/html")
+    if fmt == "html":
+        return await handle_dashboard(request)
 
     chart = pipeline.graph.to_mermaid()
-    return web.Response(text=chart, content_type="text/plain", charset="utf-8")
+    return web.Response(
+        text=chart,
+        content_type="text/plain",
+        charset="utf-8",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
 
 async def handle_alert_test(request: web.Request) -> web.Response:
     """Dispatches a test Discord alert to verify webhook health on demand."""
@@ -592,6 +1126,66 @@ async def handle_alert_test(request: web.Request) -> web.Response:
         force=True
     )
     return web.json_response(res)
+
+async def handle_ecs_ingest(request: web.Request) -> web.Response:
+    """Ingest ECS events from a Logstash `http` output. See README.
+
+    Deliberately a separate route from /ingest. /ingest treats a JSON array as a
+    list of LINES and falls back to str(x) for anything that is not a string --
+    so a json_batch array of ECS objects posted there is accepted with a 200 and
+    stored as Python dict reprs, structure silently gone. That failure surfaces
+    days later as "why is the threat view empty". This path refuses loudly
+    instead.
+
+    The status codes are the durability design. Logstash retries 429 and 5xx
+    indefinitely from its own persistent queue, so refusing work we cannot do
+    hands the batch back to the component that can hold it. That is why LogNode
+    stays best-effort internally rather than growing a disk queue of its own.
+    """
+    import ecs
+
+    # Shed FIRST -- before reading the body, before gunzip, before parsing.
+    # Checking after the work is done spends exactly the CPU we are shedding.
+    shed = ecs.should_shed(pipeline.pg.queue.qsize(),
+                           pipeline.pg.queue.maxsize,
+                           pipeline.pg.pool is not None)
+    if shed:
+        return web.json_response(
+            {"error": "sink unavailable" if shed == 503 else "queue high water",
+             "queued": pipeline.pg.queue.qsize()},
+            status=shed, headers={"Retry-After": "5"})
+
+    if not ecs.check_auth(request.headers.get("Authorization"),
+                          os.environ.get("LOGNODE_INGEST_TOKEN")):
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    try:
+        # aiohttp has usually already decompressed by here; decode_batch
+        # decides from the bytes rather than the header, so both cases work.
+        docs = ecs.decode_batch(await request.read(),
+                                request.headers.get("Content-Type", ""),
+                                request.headers.get("Content-Encoding", ""))
+    except ecs.BadBatch as exc:
+        # 400 is NOT retryable, and that is correct: a body we cannot parse will
+        # not parse on the tenth attempt either, and returning a retryable code
+        # would put the same poison batch into an infinite redelivery loop.
+        return web.json_response({"error": str(exc)}, status=400)
+
+    accepted = skipped = 0
+    for doc in docs:
+        mapped = ecs.map_event(doc)
+        if mapped is None:
+            skipped += 1
+            continue
+        # await, never create_task. The awaiting IS the backpressure; the
+        # create_task in handle_loki_push is why that path can accept work it
+        # will never store.
+        await pipeline.ingest_structured(mapped)
+        accepted += 1
+
+    return web.json_response({"received": len(docs), "accepted": accepted,
+                              "skipped": skipped})
+
 
 async def handle_ingest(request: web.Request) -> web.Response:
     content_type = request.content_type.lower()
@@ -789,7 +1383,7 @@ async def findings_sweep():
             break
         except Exception as exc:
             print("[Findings] sweep error: %s" % exc)
-        await asyncio.sleep(FINDING_SWEEP_SECONDS)
+        await asyncio.sleep(F.SWEEP_SECONDS)
 
 async def main():
     loop = asyncio.get_running_loop()
@@ -829,13 +1423,20 @@ async def main():
             print(f"[Network] Warning: UDP bind skipped on {host}:{udp_port}: {e}")
 
     # Setup HTTP application
-    app = web.Application()
+    # aiohttp defaults client_max_size to 1 MiB. A Logstash json_batch of a few
+    # thousand events exceeds that and comes back 413 -- which is NOT in
+    # Logstash's retryable_codes, so it would drop the batch silently rather
+    # than retry. Raise the ceiling to something a real batch fits in.
+    app = web.Application(client_max_size=32 * 1024 * 1024)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/stats", handle_health)
     app.router.add_get("/templates", handle_templates)
     app.router.add_get("/query", handle_query)
     app.router.add_get("/search", handle_search_ui)
     app.router.add_get("/threats", handle_threats)
+    app.router.add_get("/threats/campaigns", handle_list_campaigns)
+    app.router.add_post("/threats/campaign/{actor_id}/tag", handle_tag_campaign)
+    app.router.add_post("/threats/actor/{actor_id}/tag", handle_tag_campaign)
     app.router.add_get("/findings", handle_findings_list)
     app.router.add_get("/findings/summary", handle_findings_summary)
     app.router.add_get("/findings/{id}", handle_finding_get)
@@ -846,12 +1447,17 @@ async def main():
     app.router.add_get("/graph", handle_graph)
     app.router.add_get("/graph/shifts", handle_graph_shifts)
     app.router.add_get("/graph/subgraph", handle_graph_subgraph)
+    app.router.add_get("/graph/host-flows", handle_graph_host_flows)
+    app.router.add_get("/graph/time-lapse", handle_graph_time_lapse)
     app.router.add_get("/graph/mermaid", handle_graph_mermaid)
-    app.router.add_get("/dashboard", handle_graph_mermaid)
-    app.router.add_get("/ui", handle_graph_mermaid)
+    app.router.add_get("/dashboard", handle_dashboard)
+    app.router.add_get("/ui", handle_dashboard)
+    app.router.add_post("/graphql", handle_graphql_post)
+    app.router.add_get("/graphql", handle_graphql_get)
     app.router.add_post("/alert/test", handle_alert_test)
     app.router.add_post("/sync", handle_sync)
     app.router.add_post("/sync/templates", handle_sync_templates)
+    app.router.add_post("/ingest/ecs", handle_ecs_ingest)
     app.router.add_post("/ingest", handle_ingest)
     app.router.add_post("/loki/api/v1/push", handle_loki_push)
 

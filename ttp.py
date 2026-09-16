@@ -40,7 +40,12 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
         r"[^/]*\.(?:php|env|ya?ml|json|ini|conf)$"
         r"|wp-config\.php|settings\.py|/config\.py|config\.(?:json|js|php|ya?ml|env)"
         r"|database\.ya?ml|appsettings[^/]*\.json|application\.ya?ml"
-        r"|docker-compose\.ya?ml?|\.npmrc|\.htpasswd|/credentials", re.I)),
+        r"|docker-compose\.ya?ml?|\.npmrc|\.htpasswd|/credentials"
+        # From the unclassified tail: application logs (a Laravel log carries
+        # stack traces with database DSNs in them), IIS and Kubernetes config,
+        # and the Firebase client config that names the project and API key.
+        r"|/storage/logs/|laravel\.log|/error_log$|web\.config$"
+        r"|kubernetes\.ya?ml|google-services\.json|firebase[^/]*\.json", re.I)),
 
     # CI definitions leak registry tokens, deploy keys and internal hostnames.
     ("ci-config-exposure", "discovery", re.compile(
@@ -60,9 +65,22 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
         r"|/computeMetadata/|%3A%2F%2F169\.254|\?url=https?(?::|%3A)"
         r"|[?&](?:url|uri|target|dest|redirect|next|proxy)=(?:https?|file|gopher)", re.I)),
 
+    # Bare relay endpoints with no argument: is this host an open proxy? A
+    # /fetch?url=... is SSRF and matched above; a bare /fetch, /proxy or /sse
+    # is the probe that precedes it, and was landing in "unknown".
+    ("proxy-probe", "discovery", re.compile(
+        r"^/(?:fetch|proxy|sse|relay|forward)(?:$|\?)", re.I)),
+
+    # eval-stdin.php is CVE-2017-9841: PHPUnit's test helper evals the request
+    # body, and it ships inside vendor/ on any Laravel or Composer app that
+    # deployed its dev dependencies. It was the largest single family in the
+    # unclassified tail -- ~80 lines a day across twenty path prefixes, one
+    # tool (libredtail-http), scored "unknown", so it never clustered and never
+    # raised a finding despite being the highest-severity technique here.
     ("rce-attempt", "execution", re.compile(
         r"php://input|allow_url_include|auto_prepend_file|\$\{jndi:|/cgi-bin/"
-        r"|eval\(|system\(|/bin/sh|cmd=|shell_exec", re.I)),
+        r"|eval\(|system\(|/bin/sh|cmd=|shell_exec"
+        r"|eval-stdin\.php|/phpunit/", re.I)),
 
     ("path-traversal", "discovery", re.compile(
         r"\.\./|\.\.%2f|%2e%2e|/etc/passwd|/proc/self", re.I)),
@@ -155,6 +173,16 @@ BENIGN = re.compile(
                    r"^/(?:static/|assets/|health$|healthz$|ping$|status$)"),
     re.I)
 
+# Benign on every deployment, regardless of LOGNODE_BENIGN_PATHS: an operator
+# who overrides that regex with their own routes should not have to remember
+# to re-list the ad-network manifests. ads.txt and app-ads.txt are fetched by
+# crawlers verifying sellers, and nothing else.
+#
+# robots.txt is deliberately NOT here. A scanner reads it as a directory
+# listing -- the one observed fetching ours self-identified as a scanner --
+# so it stays recon.
+ALWAYS_BENIGN = re.compile(r"^/(?:app-)?ads\.txt$", re.I)
+
 # uvicorn/gunicorn access line:  INFO:  1.2.3.4:5678 - "GET /path HTTP/1.1" 404 Not Found
 ACCESS_RE = re.compile(
     r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3}):(?P<sport>\d+)\s+-\s+"
@@ -174,7 +202,7 @@ def classify_path(path: str, method: str = "GET") -> Tuple[str, str]:
     # rule -- the normalisation meant to close a bypass opened a bigger one.
     _path, _sep, _query = path.partition("?")
     path = re.sub(r"/{2,}", "/", _path) + _sep + _query
-    if BENIGN.search(path):
+    if BENIGN.search(path) or ALWAYS_BENIGN.search(path):
         return ("benign", "none")
     for name, tactic, rx in TECHNIQUES:
         if rx.search(path):
@@ -257,6 +285,100 @@ def make_internal_check(graph):
     return is_internal
 
 
+ADJECTIVES: List[str] = [
+    "VELVET", "COBALT", "CRIMSON", "AMBER", "RUSTY", "IRON", "SHADOW", "STATIC",
+    "VOID", "FROST", "NEON", "BITTER", "VIPER", "SCARLET", "OBSIDIAN", "GHOST",
+    "COPPER", "TITAN", "ONYX", "MERCURY", "SILENT", "BRONZE", "AURORA", "CYBER",
+    "ECLIPSE", "TEMPEST", "RADICAL", "STEALTH", "CHAOS", "VAPOR", "SPECTRAL", "CHRONO",
+    "QUANTUM", "SOLAR", "LUNAR", "STEEL", "GLITCH", "VECTOR", "PRISM", "APEX",
+    "FABLED", "RAVEN", "MYSTIC", "ROGUE", "CYPHER", "ZERO", "NEXUS", "FRACTAL",
+    "COSMIC", "TURBO", "BLAZE", "HAZARD", "DUSK", "DAWN", "NOVA", "PULSE",
+    "ZENITH", "VORTEX", "SIGMA", "OMEGA", "ALPHA", "KINETIC", "WARP", "HAVOC"
+]
+
+NOUNS: List[str] = [
+    "SPIDER", "CHINCHILLA", "PHANTOM", "GOBLIN", "JACKAL", "SPECTRE", "HYDRA", "WEAVER",
+    "RAVEN", "STALKER", "TEMPEST", "ARCHER", "SCORPION", "VIPER", "FALCON", "BEAR",
+    "PANDA", "OCELOT", "BADGER", "MANTICORE", "KRAKEN", "COBRA", "GRIFFIN", "FOX",
+    "LYNX", "MANTIS", "HORNET", "WOLF", "COYOTE", "CONDOR", "PANTHER", "BANSHEE",
+    "GARGOYLE", "CHIMERA", "BASILISK", "WYVERN", "TITAN", "MINOTAUR", "CERBERUS", "SIREN",
+    "CYCLOPS", "VALKYRIE", "CENTAUR", "DRAGON", "DRAKE", "SHADOW", "WRAITH", "GHOUL",
+    "REAPER", "SPECTER", "SENTINEL", "WARDEN", "OUTLAW", "HUNTER", "CORSAIR", "RAIDER",
+    "BANDIT", "NOMAD", "VOYAGER", "PROWLER", "TRACKER", "DRIFTER", "COURIER", "BLADE"
+]
+
+ADJECTIVE_EMOJIS: List[str] = [
+    "🟣", "🔷", "🩸", "🍯", "🧱", "🛡️", "👤", "⚡",
+    "🕳️", "❄️", "💡", "🍋", "🐍", "🌹", "🖤", "👻",
+    "🟤", "🗿", "⬛", "🌡️", "🤫", "🥉", "🌌", "🤖",
+    "🌒", "🌪️", "🛹", "🥷", "🌀", "💨", "🔮", "⏳",
+    "⚛️", "☀️", "🌙", "⚔️", "👾", "🏹", "💎", "🏔️",
+    "📜", "🪶", "🧙", "🎭", "🔐", "0️⃣", "🌐", "💠",
+    "🪐", "🚀", "🔥", "☣️", "🌇", "🌅", "💥", "💓",
+    "👑", "🌀", "🧮", "🛸", "🐺", "⚡", "🕳️", "💣"
+]
+
+NOUN_EMOJIS: List[str] = [
+    "🕷️", "🐭", "👻", "👺", "🐺", "👤", "🐉", "🕸️",
+    "🦅", "👁️", "⛈️", "🏹", "🦂", "🐍", "🦅", "🐻",
+    "🐼", "🐆", "🦡", "🦁", "🦑", "🐍", "🦅", "🦊",
+    "🐱", "🦗", "🐝", "🐺", "🐺", "🦅", "🐆", "🗣️",
+    "🦇", "🐲", "🦎", "🐉", "🗿", "🐂", "🐕", "🧜",
+    "👁️", "🛡️", "🐎", "🐲", "🦆", "👥", "💀", "🧟",
+    "⚰️", "👻", "🏰", "🗝️", "🤠", "🎯", "🏴‍☠️", "🗡️",
+    "🦹", "🧭", "⛵", "🐾", "🔍", "🍂", "📦", "🗡️"
+]
+
+
+def generate_actor_profile(fingerprint: str, techniques: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Generates a stable, deterministic campaign actor identity based on technique fingerprint."""
+    if not fingerprint:
+        return {
+            "actor_id": "ACTOR-0000",
+            "codename": "UNKNOWN ACTOR",
+            "emoji": "❓❓",
+            "full_name": "❓❓ UNKNOWN ACTOR (ACTOR-0000)",
+            "threat_tier": "LOW",
+            "tags": []
+        }
+
+    h = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    int_val = int(h[:8], 16)
+    adj_idx = int_val % len(ADJECTIVES)
+    noun_idx = (int_val // len(ADJECTIVES)) % len(NOUNS)
+    adj = ADJECTIVES[adj_idx]
+    noun = NOUNS[noun_idx]
+    emoji = f"{ADJECTIVE_EMOJIS[adj_idx]}{NOUN_EMOJIS[noun_idx]}"
+    actor_id = f"ACTOR-{h[:4].upper()}"
+    codename = f"{adj} {noun}"
+    full_name = f"{emoji} {codename} ({actor_id})"
+
+    techs = techniques or fingerprint.split("+")
+    high_threat = {"ssrf-metadata", "rce-attempt", "webshell-probe", "private-key-theft"}
+    elevated_threat = {"path-traversal", "secret-file-harvest", "backup-hunt"}
+
+    if any(t in high_threat for t in techs):
+        threat_tier = "CRITICAL"
+    elif any(t in elevated_threat for t in techs):
+        threat_tier = "HIGH"
+    elif any(t != "recon" for t in techs):
+        threat_tier = "ELEVATED"
+    else:
+        threat_tier = "RECON"
+
+    tags = sorted(list({t for t in techs if t and t != "unknown"}))
+
+    return {
+        "actor_id": actor_id,
+        "codename": codename,
+        "emoji": emoji,
+        "full_name": full_name,
+        "threat_tier": threat_tier,
+        "tags": tags,
+        "fingerprint": fingerprint
+    }
+
+
 def build_threat_view(events: List[Dict[str, Any]],
                       min_hits: int = 1,
                       is_internal=None) -> Dict[str, Any]:
@@ -309,8 +431,16 @@ def build_threat_view(events: List[Dict[str, Any]],
         # tails differ, which is the opposite of what a fingerprint is for.
         named = sorted(t for t in a["techniques"] if t != "unknown")
         fingerprint = "+".join(named)
+        prof = generate_actor_profile(fingerprint, list(a["techniques"].keys()))
+
         out_actors.append({
             "ip": a["ip"],
+            "actor_id": prof["actor_id"],
+            "actor_name": prof["codename"],
+            "emoji": prof["emoji"],
+            "campaign_name": prof["full_name"],
+            "threat_tier": prof["threat_tier"],
+            "tags": prof["tags"],
             "hits": a["hits"],
             "hostile_hits": hostile,
             "benign_hits": a["benign"],
@@ -341,18 +471,36 @@ def build_threat_view(events: List[Dict[str, Any]],
         c = camps.setdefault(a["fingerprint"], {
             "fingerprint": a["fingerprint"], "actors": [], "hits": 0,
             "targets": set(), "techniques": a["techniques"].keys(),
+            "first_seen": a.get("first_seen"), "last_seen": a.get("last_seen"),
         })
         c["actors"].append(a["ip"])
         c["hits"] += a["hostile_hits"]
         c["targets"].update(a["targets"])
+        if a.get("first_seen"):
+            c["first_seen"] = min(c["first_seen"] or a["first_seen"], a["first_seen"])
+        if a.get("last_seen"):
+            c["last_seen"] = max(c["last_seen"] or a["last_seen"], a["last_seen"])
 
-    campaigns = sorted(
-        ({"fingerprint": c["fingerprint"],
-          "actor_count": len(c["actors"]),
-          "actors": c["actors"][:25],
-          "hits": c["hits"],
-          "targets": sorted(c["targets"])} for c in camps.values()),
-        key=lambda c: (-c["actor_count"], -c["hits"]))
+    campaigns = []
+    for c in camps.values():
+        prof = generate_actor_profile(c["fingerprint"], list(c["techniques"]))
+        campaigns.append({
+            "fingerprint": c["fingerprint"],
+            "actor_id": prof["actor_id"],
+            "actor_name": prof["codename"],
+            "emoji": prof["emoji"],
+            "full_name": prof["full_name"],
+            "threat_tier": prof["threat_tier"],
+            "tags": prof["tags"],
+            "actor_count": len(c["actors"]),
+            "actors": c["actors"][:25],
+            "hits": c["hits"],
+            "targets": sorted(c["targets"]),
+            "first_seen": c.get("first_seen"),
+            "last_seen": c.get("last_seen"),
+        })
+
+    campaigns.sort(key=lambda c: (-c["actor_count"], -c["hits"]))
 
     technique_totals: Dict[str, int] = defaultdict(int)
     for a in out_actors:

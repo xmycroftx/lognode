@@ -69,5 +69,19 @@ check("prune leaves healthy edges alone", len(g2.edges) == 3)
 # --- depth is clamped -------------------------------------------------------
 check("absurd depth is clamped, not fatal", g.subgraph("hub", depth=999)["depth"] <= 6)
 
+# --- edge port and display label in Mermaid ---------------------------------
+e_tcp = G.FleetEdge("e1", "hub", "laptop", "tcp", "port_9514", is_declared=True, total_volume=10)
+check("FleetEdge port extracted from channel", e_tcp.port == 9514)
+check("FleetEdge display_label includes tcp port", e_tcp.display_label() == "tcp:9514")
+check("FleetEdge to_dict has port and display_label", e_tcp.to_dict()["port"] == 9514 and e_tcp.to_dict()["display_label"] == "tcp:9514")
+
+e_http = G.FleetEdge("e2", "hub", "laptop", "http", "telemetry", is_declared=True, total_volume=10)
+check("FleetEdge http without port preserves label", e_http.display_label() == "http")
+
+g_mermaid = fresh()
+g_mermaid.edges["hub->laptop:tcp"] = e_tcp
+mermaid_out = g_mermaid.to_mermaid()
+check("Mermaid output displays tcp:9514 on edge", "tcp:9514" in mermaid_out)
+
 print("  ---", "ALL PASS" if ok else "FAILURES PRESENT")
 raise SystemExit(0 if ok else 1)

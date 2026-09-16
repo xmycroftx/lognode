@@ -53,6 +53,28 @@ check("ssrf outscores every other technique",
 check("vcs-exposure", tech("/.git/config") == "vcs-exposure")
 check("path-traversal", tech("/?file=../../../../etc/passwd") == "path-traversal")
 check("rce-attempt", tech("/?x=php://input") == "rce-attempt")
+
+# --- the unclassified tail, measured at 24.5% of the 24h view -----------------
+# CVE-2017-9841 under every prefix the scanner tries. This was ~80 lines a day
+# scored "unknown": no cluster, no finding, for an RCE probe.
+for p in ["/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
+          "/lib/phpunit/Util/PHP/eval-stdin.php",
+          "/ws/ec/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
+          "/phpunit/src/Util/PHP/eval-stdin.php"]:
+    check("eval-stdin.php is rce-attempt: %s" % p[:40], tech(p) == "rce-attempt", tech(p))
+for p in ["/storage/logs/laravel.log", "/error_log", "/web.config",
+          "/kubernetes.yml", "/google-services.json"]:
+    check("harvest: %s" % p, tech(p) == "secret-file-harvest", tech(p))
+for p in ["/fetch", "/proxy", "/sse", "/proxy?x=1"]:
+    check("bare relay endpoint is proxy-probe: %s" % p, tech(p) == "proxy-probe", tech(p))
+check("but /fetch?url=http:// is still SSRF, not proxy-probe",
+      tech("/fetch?url=http%3A%2F%2F169.254.169.254/") == "ssrf-metadata")
+check("app-ads.txt is benign", tech("/app-ads.txt") == "benign", tech("/app-ads.txt"))
+check("ads.txt is benign", tech("/ads.txt") == "benign")
+check("ads.txt is benign even under a custom LOGNODE_BENIGN_PATHS (this file sets one)",
+      "ads" not in os.environ.get("LOGNODE_BENIGN_PATHS", "") and tech("/ads.txt") == "benign")
+check("a legitimate /error page is not harvest", tech("/error") != "secret-file-harvest", tech("/error"))
+
 check("webshell-probe", tech("/i.php") == "webshell-probe")
 check("info-disclosure", tech("/phpinfo.php") == "info-disclosure")
 check("cms-probe", tech("/wp-login.php") == "cms-probe")
@@ -95,6 +117,14 @@ check("identical technique sets cluster into one campaign",
       str(camp))
 check("fingerprint is the sorted technique set",
       camp and camp[0]["fingerprint"] == "secret-file-harvest+vcs-exposure")
+check("campaign has actor_name and actor_id",
+      bool(camp[0].get("actor_name")) and str(camp[0].get("actor_id", "")).startswith("ACTOR-"),
+      str(camp[0]))
+check("campaign has first_seen and last_seen",
+      camp[0].get("first_seen") == "2026-09-15T00:00:00Z" and camp[0].get("last_seen") == "2026-09-15T00:00:00Z")
+check("actors have campaign attribution and seen timestamps",
+      any(a.get("actor_name") and a.get("campaign_name") and a.get("first_seen") for a in v["actors"]),
+      str(v["actors"]))
 
 recon_only = [a for a in v["actors"] if a["ip"] == "203.0.113.5"][0]
 check("benign hits counted separately from hostile", recon_only["benign_hits"] == 1)

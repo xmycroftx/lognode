@@ -105,6 +105,22 @@ const ipLink = ip => '<a class="ip" href="/search?ip='+ip+'" title="every log li
 
 function scoreClass(n){ return n>=150?"s-crit":(n>=60?"s-high":"s-low"); }
 
+function fmtDate(s) {
+  if (!s) return '';
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return String(s);
+    const yr = d.getUTCFullYear();
+    const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const da = String(d.getUTCDate()).padStart(2, '0');
+    const hr = String(d.getUTCHours()).padStart(2, '0');
+    const mi = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${yr}-${mo}-${da} ${hr}:${mi}Z`;
+  } catch(e) {
+    return String(s);
+  }
+}
+
 async function load(){
   const since = $('since').value;
   $('sub').textContent = 'scanning…';
@@ -132,14 +148,27 @@ async function load(){
     '<span class="bar"><i style="width:'+Math.max(2,100*n/max)+'%"></i></span>'+
     '<span class="n">'+n+'</span></div>').join('') || '<div class="empty">nothing</div>';
 
-  $('campaigns').innerHTML = (d.campaigns||[]).filter(c=>c.actor_count>1).map(c=>
-    '<div class="camp"><div class="fp">'+
-      c.fingerprint.split('+').map(t=>'<span class="chip'+
-        (["critical","high"].includes(SEV[t])?' hot':'')+'">'+esc(t)+'</span>').join('')+
-    '</div><div class="who"><b>'+c.actor_count+'</b> addresses · '+c.hits+
-      ' hostile requests · targets: '+esc((c.targets||[]).join(', '))+
-      '<br>'+c.actors.map(ipLink).join(' ')+'</div></div>').join('')
-    || '<div class="empty">No address ran the same technique set as another in this window.</div>';
+  $('campaigns').innerHTML = (d.campaigns||[]).filter(c=>c.actor_count>0).map(c=>{
+    const tagHtml = (c.followup_tags||[]).map(t => '<span class="chip" style="border-color:var(--cyan); color:var(--cyan); font-weight:600">🏷️ '+esc(t)+'</span>').join('');
+    return '<div class="camp">' +
+      '<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; flex-wrap:wrap; gap:8px">' +
+        '<div>' +
+          '<span class="chip hot" style="font-weight:700; font-size:12px; background:rgba(244,63,94,0.12)">⚡ ' + esc(c.full_name || c.actor_name) + '</span>' +
+          (c.threat_tier ? '<span class="chip ' + (c.threat_tier === "CRITICAL" ? "hot" : "") + '">Tier: ' + esc(c.threat_tier) + '</span>' : '') +
+          tagHtml +
+        '</div>' +
+        '<button onclick="promptTagActor(\'' + esc(c.actor_id) + '\', \'' + esc(c.actor_name) + '\', \'' + esc(c.fingerprint) + '\', \'' + esc(c.emoji || '') + '\')" style="background:var(--bg-card); border:1px solid var(--border-subtle); color:var(--cyan); border-radius:5px; padding:3px 8px; font-size:11px; cursor:pointer">+ Tag Follow-Up</button>' +
+      '</div>' +
+      '<div class="fp">' +
+        c.fingerprint.split('+').map(t=>'<span class="chip'+
+          (["critical","high"].includes(SEV[t])?' hot':'')+'">'+esc(t)+'</span>').join('') +
+      '</div>' +
+      (c.notes ? '<div style="color:var(--amber); font-size:11.5px; margin-top:4px">📝 Note: ' + esc(c.notes) + '</div>' : '') +
+      '<div class="who"><b>'+c.actor_count+'</b> address' + (c.actor_count>1?'es':'') + ' · '+c.hits+
+        ' hostile requests · targets: '+esc((c.targets||[]).join(', '))+
+        (c.first_seen ? '<br><span style="color:var(--text-dim); font-size:11px">🕒 <b>First seen:</b> ' + fmtDate(c.first_seen) + (c.last_seen && c.last_seen !== c.first_seen ? ' &nbsp;·&nbsp; <b>Last seen:</b> ' + fmtDate(c.last_seen) : '') + '</span>' : '') +
+        '<br>'+c.actors.map(ipLink).join(' ') + '</div></div>';
+  }).join('') || '<div class="empty">No campaigns detected in this window.</div>';
 
   $('owners').innerHTML = (d.owners||[]).filter(o=>o.asn).slice(0,12).map(o=>
     '<div class="camp"><div class="fp">'+
@@ -151,11 +180,18 @@ async function load(){
       '<br>'+o.actors.map(ipLink).join(' ')+'</div></div>').join('')
     || '<div class="empty">'+(d.enriched?'No ownership data returned.':'Ownership lookup disabled.')+'</div>';
 
-  $('actors').innerHTML = '<table><thead><tr><th>score</th><th>address</th><th>owner</th><th>hostile</th>'+
+  $('actors').innerHTML = '<table><thead><tr><th>score</th><th>address</th><th>seen (UTC)</th><th>owner</th><th>hostile</th>'+
     '<th>targets</th><th>techniques &amp; sample paths</th></tr></thead><tbody>'+
     (d.actors||[]).slice(0,60).map(a=>
       '<tr><td class="score '+scoreClass(a.score)+'">'+a.score+'</td>'+
-      '<td>'+ipLink(a.ip)+(a.rdns?'<div class="paths">'+esc(a.rdns)+'</div>':'')+'</td>'+
+      '<td>'+ipLink(a.ip)+
+        (a.campaign_name ? '<div style="color:var(--purple); font-weight:600; font-size:11px; margin-top:2px">⚡ ' + esc(a.campaign_name) + '</div>' : '')+
+        (a.rdns?'<div class="paths">'+esc(a.rdns)+'</div>':'')+
+      '</td>'+
+      '<td style="white-space:nowrap; font-size:11px; color:var(--text-muted)">'+
+        (a.first_seen ? '<div><span style="color:var(--text-dim)">first:</span> ' + fmtDate(a.first_seen) + '</div>' : '')+
+        (a.last_seen ? '<div><span style="color:var(--text-dim)">last:</span> ' + fmtDate(a.last_seen) + '</div>' : '')+
+      '</td>'+
       '<td>'+(a.country?'<span class="chip">'+esc(a.country)+'</span>':'')+
         (a.org?'<div class="paths">'+esc(a.org.slice(0,34))+'</div>':'')+'</td>'+
       '<td>'+a.hostile_hits+(a.benign_hits?' <span style="color:var(--text-dim)">(+'+a.benign_hits+' benign)</span>':'')+'</td>'+
@@ -164,8 +200,21 @@ async function load(){
           (["critical","high"].includes(SEV[t])?' hot':'')+'">'+esc(t)+' '+n+'</span>').join('')+
         '<div class="paths">'+esc((a.sample_paths||[]).slice(0,5).join('  '))+'</div>'+
         ((a.tells&&a.tells.length)?'<div class="tells">'+a.tells.map(t=>'▸ '+esc(t)).join('<br>')+'</div>':'')+
-        '</td></tr>').join('')+
+      '</td></tr>').join('')+
     '</tbody></table>';
+}
+
+async function promptTagActor(actorId, codename, fingerprint, emoji) {
+  const tagsStr = prompt(`Enter follow-up tags for ${emoji || ''} ${codename} (${actorId})\n(comma separated, e.g. firewall-block, monitor-ssh):`);
+  if (tagsStr == null) return;
+  const notes = prompt(`Optional investigation notes for ${emoji || ''} ${codename}:`) || "";
+  const tags = tagsStr.split(',').map(t => t.trim()).filter(Boolean);
+  await fetch(`/threats/campaign/${encodeURIComponent(actorId)}/tag`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ followup_tags: tags, notes: notes, codename: codename, emoji: emoji, fingerprint: fingerprint })
+  });
+  load();
 }
 
 $('since').addEventListener('change', load);

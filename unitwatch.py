@@ -12,6 +12,7 @@ not decoration: without it, a watcher that has died is indistinguishable from a
 fleet with nothing wrong -- which is precisely the failure this tool exists to
 end. Silence must mean "the watcher is gone", never "all is well".
 """
+import json
 import os
 import socket
 import subprocess
@@ -81,9 +82,16 @@ def main():
     # Heartbeat last, so a reader sees the failures then the count that frames them.
     lines.append("unitwatch check=complete failed_count=%d instance=%s" % (total, _kv(INSTANCE)))
 
-    payload = "\n".join(lines).encode("utf-8")
+    # JSON with labels, the shape netsnap uses. The text/plain form carried the
+    # instance only inside each line, so the alert parser could read it but the
+    # stored row had no labels.instance and the traffic graph attributed every
+    # heartbeat from every host to one "unknown" node -- 1,940 rows a day.
+    payload = json.dumps({
+        "lines": lines,
+        "labels": {"instance": INSTANCE, "source": "unitwatch", "protocol": "http"},
+    }).encode("utf-8")
     req = urllib.request.Request(LOGNODE, data=payload,
-                                 headers={"Content-Type": "text/plain"})
+                                 headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             if resp.status >= 300:

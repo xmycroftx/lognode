@@ -179,6 +179,35 @@ class FleetEdge:
             return max(1, min(10, w))
         return 1
 
+    @property
+    def port(self) -> int:
+        p = self.metadata.get("port")
+        if p:
+            try:
+                return int(p)
+            except ValueError:
+                pass
+        if self.channel.startswith("port_"):
+            try:
+                return int(self.channel[5:])
+            except ValueError:
+                pass
+        elif self.channel.isdigit():
+            return int(self.channel)
+        return 0
+
+    def display_label(self) -> str:
+        p = self.port
+        if self.protocol.lower() in ("tcp", "udp"):
+            if p:
+                return f"{self.protocol}:{p}"
+            if self.channel and self.channel not in ("socket", "traffic", "unknown"):
+                return f"{self.protocol}:{self.channel}"
+            return self.protocol
+        if p and p not in (80, 443, 22, 53):
+            return f"{self.protocol}:{p}"
+        return self.protocol
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -186,6 +215,8 @@ class FleetEdge:
             "target": self.target,
             "protocol": self.protocol,
             "channel": self.channel,
+            "port": self.port,
+            "display_label": self.display_label(),
             "is_declared": self.is_declared,
             "expected_min_rate": self.expected_min_rate,
             "total_volume": self.total_volume,
@@ -445,6 +476,11 @@ class TrafficGraph:
                 metadata=metadata or {}
             )
             self.edges[edge_id] = edge
+        else:
+            if metadata:
+                edge.metadata.update(metadata)
+            if channel and channel.startswith("port_") and not edge.channel.startswith("port_"):
+                edge.channel = channel
 
         edge.record(count=count, byte_count=byte_count, ts=now)
 
@@ -515,6 +551,7 @@ class TrafficGraph:
                     source=a, target=b, protocol=proto,
                     channel=f"port_{svc}" if svc else "socket",
                     count=1, byte_count=b_count,
+                    metadata={"port": svc} if svc else {}
                 )
             return
 
@@ -933,8 +970,9 @@ class TrafficGraph:
 
     def to_dict(self) -> Dict[str, Any]:
         """GraphQL-friendly full graph schema output."""
+        start = getattr(self, "start_time", time.time())
         return {
-            "uptime_seconds": round(time.time() - self.start_time, 1),
+            "uptime_seconds": round(time.time() - start, 1),
             "summary": {
                 "total_nodes": len(self.nodes),
                 "total_edges": len(self.edges),
@@ -1039,25 +1077,592 @@ class TrafficGraph:
             "mermaid": self.to_mermaid(only=ids),
         }
 
-    def to_mermaid(self, only: Optional[Set[str]] = None) -> str:
+    def _extract_flows_from_events(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        flows = []
+        for ev in events:
+            raw = ev.get("raw", "")
+            labels = ev.get("labels") or {}
+            kv = ev.get("kv") or {}
+            event_name = ev.get("event") or ""
+            ts = ev.get("timestamp") or ""
+
+            # 1. Netsnap socket flow
+            if event_name.startswith("netsnap") or labels.get("source") == "netsnap" or "netsnap " in raw:
+                active_kv = dict(kv)
+                if not active_kv or ("local_port" not in active_kv and "peer_port" not in active_kv and "local" not in active_kv):
+                    for tok in raw.split():
+                        if "=" in tok:
+                            k, v = tok.split("=", 1)
+                            active_kv.setdefault(k, v)
+
+                proc = active_kv.get("process")
+                local_ip = active_kv.get("local_ip") or active_kv.get("local")
+                peer_ip = active_kv.get("peer_ip") or active_kv.get("peer") or active_kv.get("ip")
+                local_port = active_kv.get("local_port")
+                peer_port = active_kv.get("peer_port")
+                proto = active_kv.get("proto") or "tcp"
+
+                if local_ip and ":" in str(local_ip) and not local_port:
+                    parts = str(local_ip).rsplit(":", 1)
+                    if parts[1].isdigit():
+                        local_ip, local_port = parts[0], parts[1]
+
+                if peer_ip and ":" in str(peer_ip) and not peer_port:
+                    parts = str(peer_ip).rsplit(":", 1)
+                    if parts[1].isdigit():
+                        peer_ip, peer_port = parts[0], parts[1]
+
+                src_host = labels.get("instance") or (self.resolve_node_id(local_ip) if local_ip else "unknown")
+                if not peer_ip or not local_ip:
+                    continue
+
+                resolved_peer = self.resolve_node_id(peer_ip)
+                if resolved_peer == peer_ip:
+                    resolved_peer = f"external:{peer_ip}"
+
+                src_proc = f"{src_host}:{proc}" if proc and proc != "-" else src_host
+
+                try:
+                    lp = int(local_port or 0)
+                    pp = int(peer_port or 0)
+                except ValueError:
+                    lp = pp = 0
+
+                if pp and (lp == 0 or pp <= lp):
+                    source = src_proc
+                    target = resolved_peer
+                    service_port = pp
+                else:
+                    source = resolved_peer
+                    target = src_proc
+                    service_port = lp
+
+                flows.append({
+                    "source": source,
+                    "target": target,
+                    "protocol": proto,
+                    "channel": f"port_{service_port}" if service_port else "socket",
+                    "port": service_port,
+                    "process": proc or "",
+                    "timestamp": ts,
+                    "raw": raw,
+                    "event": ev
+                })
+
+            # 2. SSH Access flow
+            elif event_name in ("publickey_accepted", "sshd_session", "sshd") or "Accepted publickey" in raw:
+                client_ip = kv.get("ip")
+                if not client_ip:
+                    import re
+                    m = re.search(r"from\s+(\d+\.\d+\.\d+\.\d+)", raw)
+                    if m:
+                        client_ip = m.group(1)
+                if client_ip:
+                    src_host = labels.get("instance") or "hub"
+                    resolved_client = self.resolve_node_id(client_ip)
+                    if resolved_client == client_ip:
+                        resolved_client = f"external:{client_ip}"
+                    flows.append({
+                        "source": resolved_client,
+                        "target": f"{src_host}:sshd",
+                        "protocol": "ssh",
+                        "channel": "remote_access",
+                        "port": 22,
+                        "process": "sshd",
+                        "timestamp": ts,
+                        "raw": raw,
+                        "event": ev
+                    })
+
+            # 3. DNS queries
+            elif event_name in ("query_result", "dnsmasq") or "dnsmasq" in labels.get("unit", ""):
+                client_ip = kv.get("ip") or kv.get("client")
+                domain = kv.get("url") or kv.get("domain") or kv.get("query")
+                if client_ip:
+                    resolved_client = self.resolve_node_id(client_ip)
+                    if resolved_client == client_ip:
+                        resolved_client = f"external:{client_ip}"
+                    flows.append({
+                        "source": resolved_client,
+                        "target": "hub:dnsmasq",
+                        "protocol": "dns",
+                        "channel": "dns_query",
+                        "port": 53,
+                        "process": "dnsmasq",
+                        "timestamp": ts,
+                        "raw": raw,
+                        "event": ev
+                    })
+                if domain:
+                    flows.append({
+                        "source": "hub:dnsmasq",
+                        "target": f"external:{domain}",
+                        "protocol": "dns",
+                        "channel": "dns_upstream",
+                        "port": 53,
+                        "process": "dnsmasq",
+                        "timestamp": ts,
+                        "raw": raw,
+                        "event": ev
+                    })
+
+            # 4. Telemetry ingest streams
+            elif labels.get("instance"):
+                src_host = self.resolve_node_id(labels["instance"])
+                proto = labels.get("protocol") or ("loki" if "journal" in str(labels) else "http")
+                channel = labels.get("source") or labels.get("job") or "telemetry_ingest"
+                flows.append({
+                    "source": src_host,
+                    "target": "hub:lognode",
+                    "protocol": proto,
+                    "channel": channel,
+                    "port": 9514,
+                    "process": "alloy",
+                    "timestamp": ts,
+                    "raw": raw,
+                    "event": ev
+                })
+        return flows
+
+    def search_subgraph(
+        self,
+        identifier: Optional[str] = None,
+        ip: Optional[str] = None,
+        port: Optional[Any] = None,
+        protocol: Optional[str] = None,
+        instance: Optional[str] = None,
+        process: Optional[str] = None,
+        status: Optional[str] = None,
+        depth: int = 1,
+        since_s: Optional[int] = None,
+        historical_events: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Multi-dimensional subgraph search for incident analysis across hosts, IPs, ports,
+        protocols, processes, and time windows.
+        Merges active live graph topology with historical flow events.
+        """
+        raw_ident = (identifier or ip or instance or "").strip()
+        has_criteria = bool(port or protocol or process or status or since_s or historical_events)
+
+        # Fast path for simple seed traversal when no criteria or history given
+        if raw_ident and not has_criteria and not ip and not instance:
+            return self.subgraph(raw_ident, depth=depth)
+
+        depth = max(0, min(int(depth), 6))
+        matched_edges: Dict[str, FleetEdge] = {}
+        matched_nodes: Dict[str, FleetNode] = {}
+
+        # 1. Evaluate in-memory edges
+        for eid, e in self.edges.items():
+            if protocol and e.protocol.lower() != protocol.lower():
+                continue
+            if status and e.status.upper() != status.upper():
+                continue
+            if port is not None and str(port).strip():
+                p_str = str(port).strip()
+                if p_str not in e.id and p_str not in e.channel and str(e.metadata.get("port", "")) != p_str:
+                    continue
+            if process and process.lower() not in e.source.lower() and process.lower() not in e.target.lower() and process.lower() not in e.channel.lower():
+                continue
+            if instance:
+                inst_low = instance.lower()
+                if inst_low not in e.source.lower() and inst_low not in e.target.lower():
+                    continue
+            if ip:
+                s_node = self.nodes.get(e.source)
+                t_node = self.nodes.get(e.target)
+                s_ips = ([s_node.ip] if s_node and s_node.ip else []) + (s_node.ips if s_node else [])
+                t_ips = ([t_node.ip] if t_node and t_node.ip else []) + (t_node.ips if t_node else [])
+                all_ips = set(s_ips + t_ips)
+                if not any(ip in an_ip for an_ip in all_ips) and ip not in e.id:
+                    continue
+
+            matched_edges[eid] = e
+
+        # 2. Extract and aggregate historical flows
+        if historical_events:
+            flows = self._extract_flows_from_events(historical_events)
+            for f in flows:
+                f_proto = f.get("protocol", "tcp")
+                f_port = f.get("port")
+                f_src = f["source"]
+                f_tgt = f["target"]
+                f_proc = f.get("process") or ""
+
+                if protocol and f_proto.lower() != protocol.lower():
+                    continue
+                if port is not None and str(port).strip():
+                    if str(port).strip() != str(f_port):
+                        continue
+                if process and process.lower() not in f_proc.lower() and process.lower() not in f_src.lower() and process.lower() not in f_tgt.lower():
+                    continue
+                if instance:
+                    inst_low = instance.lower()
+                    if inst_low not in f_src.lower() and inst_low not in f_tgt.lower():
+                        continue
+                if ip:
+                    if ip not in f_src and ip not in f_tgt and ip not in f.get("raw", ""):
+                        continue
+
+                f_chan = f.get("channel") or (f"port_{f_port}" if f_port else f_proto)
+                eid = f"{f_src}->{f_tgt}:{f_chan}"
+                if eid in matched_edges:
+                    matched_edges[eid].total_volume += 1
+                elif eid in self.edges:
+                    matched_edges[eid] = self.edges[eid]
+                else:
+                    matched_edges[eid] = FleetEdge(
+                        id=eid,
+                        source=f_src,
+                        target=f_tgt,
+                        protocol=f_proto,
+                        channel=f_chan,
+                        is_declared=False,
+                        total_volume=1,
+                        status="HEALTHY",
+                        metadata={"port": f_port, "process": f_proc, "historical": True}
+                    )
+
+        # 3. Resolve nodes for matched edges
+        for e in matched_edges.values():
+            for nid in (e.source, e.target):
+                if nid in self.nodes:
+                    matched_nodes[nid] = self.nodes[nid]
+                elif nid not in matched_nodes:
+                    matched_nodes[nid] = self.get_or_create_node(nid)
+
+        # If a specific identifier or instance was requested, expand to N hops
+        seed = self.resolve_node_id(raw_ident) if raw_ident else None
+        if seed and seed in matched_nodes and depth > 1:
+            hops = {seed: 0}
+            frontier = {seed}
+            for d in range(1, depth + 1):
+                nxt = set()
+                for e in matched_edges.values():
+                    if e.source in frontier and e.target not in hops:
+                        nxt.add(e.target)
+                    if e.target in frontier and e.source not in hops:
+                        nxt.add(e.source)
+                if not nxt:
+                    break
+                for n in nxt:
+                    hops[n] = d
+                frontier = nxt
+            matched_nodes = {nid: matched_nodes[nid] for nid in hops if nid in matched_nodes}
+            matched_edges = {eid: e for eid, e in matched_edges.items() if e.source in matched_nodes and e.target in matched_nodes}
+
+        # Build query summary
+        parts = []
+        if ip: parts.append(f"IP={ip}")
+        if port: parts.append(f"Port={port}")
+        if protocol: parts.append(f"Proto={protocol}")
+        if instance: parts.append(f"Host={instance}")
+        if process: parts.append(f"Proc={process}")
+        if since_s: parts.append(f"Window={since_s}s")
+        query_summary = ", ".join(parts) if parts else (f"Node={raw_ident}" if raw_ident else "All Subgraphs")
+
+        relevant_shifts = [s for s in self.shifts.values() if s.source in matched_nodes or s.target in matched_nodes]
+
+        nodes_list = list(matched_nodes.values())
+        edges_list = list(matched_edges.values())
+
+        mermaid_chart = self.to_mermaid(
+            only={n.id for n in nodes_list},
+            custom_nodes=nodes_list,
+            custom_edges=edges_list
+        )
+
+        extracted_flows = self._extract_flows_from_events(historical_events) if historical_events else []
+        return {
+            "seed": raw_ident,
+            "resolved": seed or raw_ident,
+            "found": len(nodes_list) > 0,
+            "depth": depth,
+            "node_count": len(nodes_list),
+            "edge_count": len(edges_list),
+            "nodes": [n.to_dict() for n in nodes_list],
+            "edges": [e.to_dict() for e in edges_list],
+            "shifts": [s.to_dict() for s in relevant_shifts],
+            "mermaid": mermaid_chart,
+            "query_summary": query_summary,
+            "total_flows": len(edges_list),
+            "total_volume": sum(e.total_volume for e in edges_list),
+            "matched_logs": (historical_events or [])[:50],
+            "correlated_events": (historical_events or [])[:50],
+            "historical_flows": extracted_flows,
+            "summary": {
+                "total_nodes": len(nodes_list),
+                "total_edges": len(edges_list),
+                "matched_flows": len(edges_list),
+                "active_shifts": len(relevant_shifts),
+                "query_summary": query_summary
+            }
+        }
+
+    def build_host_data_flow(
+        self,
+        host: str,
+        since_s: Optional[int] = None,
+        historical_events: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Extracts an isolated, process-aware data flow graph centered on a single host.
+        Categorizes inbound client flows, host internal processes, and outbound destinations.
+        """
+        canon = self.resolve_node_id(host)
+        host_node = self.nodes.get(canon) or self.get_or_create_node(canon)
+
+        sub_res = self.search_subgraph(
+            instance=canon,
+            since_s=since_s,
+            depth=1,
+            historical_events=historical_events
+        )
+
+        node_fields = {f.name for f in dataclasses.fields(FleetEdge)}
+        all_edges = []
+        for e in sub_res["edges"]:
+            if e["id"] in self.edges:
+                all_edges.append(self.edges[e["id"]])
+            else:
+                edata = {k: v for k, v in e.items() if k in node_fields}
+                all_edges.append(FleetEdge(**edata))
+
+        inbound_edges = []
+        outbound_edges = []
+        internal_edges = []
+        active_processes = set()
+
+        for e in all_edges:
+            is_src_host = (e.source == canon or e.source.startswith(f"{canon}:"))
+            is_tgt_host = (e.target == canon or e.target.startswith(f"{canon}:"))
+
+            if ":" in e.source and e.source.startswith(f"{canon}:"):
+                active_processes.add(e.source.split(":", 1)[1])
+            if ":" in e.target and e.target.startswith(f"{canon}:"):
+                active_processes.add(e.target.split(":", 1)[1])
+
+            if is_src_host and is_tgt_host:
+                internal_edges.append(e)
+            elif is_tgt_host:
+                inbound_edges.append(e)
+            elif is_src_host:
+                outbound_edges.append(e)
+
+        inbound_rate = sum(e.rate_1m for e in inbound_edges)
+        outbound_rate = sum(e.rate_1m for e in outbound_edges)
+        inbound_bw = sum(e.bytes_per_sec for e in inbound_edges)
+        outbound_bw = sum(e.bytes_per_sec for e in outbound_edges)
+
+        summary = {
+            "host_id": canon,
+            "host_name": host_node.name,
+            "inbound_flows": len(inbound_edges),
+            "outbound_flows": len(outbound_edges),
+            "inbound_rate": round(inbound_rate, 2),
+            "outbound_rate": round(outbound_rate, 2),
+            "inbound_bytes_per_sec": round(inbound_bw, 2),
+            "outbound_bytes_per_sec": round(outbound_bw, 2),
+            "active_processes": sorted(list(active_processes))
+        }
+
+        def _sid(nid: str) -> str:
+            import re
+            return re.sub(r'[^a-zA-Z0-9_]', '_', str(nid))
+
+        lines = ["flowchart LR"]
+        host_internal = {canon} | {e.source for e in all_edges if e.source.startswith(f"{canon}:")} | {e.target for e in all_edges if e.target.startswith(f"{canon}:")}
+        in_peers = {e.source for e in inbound_edges} - host_internal
+        out_peers = {e.target for e in outbound_edges} - host_internal
+
+        if in_peers:
+            lines.append("    subgraph InboundPeers [\"Inbound Clients & Peers\"]")
+            for p in sorted(in_peers):
+                p_name = (self.nodes[p].name if p in self.nodes else p).replace('"', "'")
+                lines.append(f"        in_{_sid(p)}[\"{p_name}\"]")
+            lines.append("    end")
+
+        safe_host_title = host_node.name.replace('"', "'")
+        lines.append(f"    subgraph HostCore [\"Host: {safe_host_title}\"]")
+        for h in sorted(host_internal):
+            h_name = (self.nodes[h].name if h in self.nodes else h).replace('"', "'")
+            lines.append(f"        {_sid(h)}[\"{h_name}\"]")
+        lines.append("    end")
+
+        if out_peers:
+            lines.append("    subgraph OutboundDest [\"Outbound Destinations & Cloud\"]")
+            for o in sorted(out_peers):
+                o_name = (self.nodes[o].name if o in self.nodes else o).replace('"', "'")
+                lines.append(f"        out_{_sid(o)}[\"{o_name}\"]")
+            lines.append("    end")
+
+        lines.append("")
+        link_styles = []
+        for idx, e in enumerate(all_edges):
+            if e in inbound_edges:
+                s_id = f"in_{_sid(e.source)}"
+                t_id = _sid(e.target)
+            elif e in outbound_edges:
+                s_id = _sid(e.source)
+                t_id = f"out_{_sid(e.target)}"
+            else:
+                s_id = _sid(e.source)
+                t_id = _sid(e.target)
+
+            label = e.display_label().replace('"', "'")
+            stroke_w = e.get_stroke_width()
+            lines.append(f"    {s_id} -->|\"{label}\"| {t_id}")
+            color = "#38bdf8" if stroke_w <= 3 else ("#3b82f6" if stroke_w <= 6 else "#6366f1")
+            link_styles.append(f"    linkStyle {idx} stroke:{color},stroke-width:{stroke_w}px;")
+
+        lines.append("")
+        lines.extend(link_styles)
+        lines.append("    classDef default fill:#1a1d24,stroke:#374151,stroke-width:1px,color:#e5e7eb;")
+        lines.append("    classDef hostCore fill:#064e3b,stroke:#059669,stroke-width:2px,color:#a7f3d0;")
+        lines.append(f"    class {_sid(canon)} hostCore;")
+
+        for p in sorted(in_peers):
+            p_clean = p.replace('"', "'")
+            lines.append(f'    click in_{_sid(p)} onNodeClick "Inspect {p_clean}"')
+        for h in sorted(host_internal):
+            h_clean = h.replace('"', "'")
+            lines.append(f'    click {_sid(h)} onNodeClick "Inspect {h_clean}"')
+        for o in sorted(out_peers):
+            o_clean = o.replace('"', "'")
+            lines.append(f'    click out_{_sid(o)} onNodeClick "Inspect {o_clean}"')
+
+        inbound_list = []
+        for e in inbound_edges:
+            d = e.to_dict()
+            d["port"] = e.metadata.get("port") or (int(e.channel.replace("port_", "")) if e.channel.startswith("port_") else 0)
+            d["process"] = e.metadata.get("process") or (e.target.split(":", 1)[1] if ":" in e.target else "")
+            inbound_list.append(d)
+
+        outbound_list = []
+        for e in outbound_edges:
+            d = e.to_dict()
+            d["port"] = e.metadata.get("port") or (int(e.channel.replace("port_", "")) if e.channel.startswith("port_") else 0)
+            d["process"] = e.metadata.get("process") or (e.source.split(":", 1)[1] if ":" in e.source else "")
+            outbound_list.append(d)
+
+        mermaid_flow = "\n".join(lines)
+
+        return {
+            "host": host_node.to_dict(),
+            "summary": summary,
+            "nodes": sub_res["nodes"],
+            "edges": sub_res["edges"],
+            "inbound": inbound_list,
+            "outbound": outbound_list,
+            "mermaid": mermaid_flow,
+            "recent_logs": (historical_events or [])[:50]
+        }
+
+    def build_time_lapse(
+        self,
+        host: Optional[str] = None,
+        ip: Optional[str] = None,
+        port: Optional[Any] = None,
+        since_s: int = 3600,
+        slices: int = 12,
+        historical_events: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Generates a sequence of discrete time-lapse graph slices over a time window.
+        Enables frame-by-frame temporal playback and connection delta analysis.
+        """
+        slices = max(3, min(slices, 60))
+        now = time.time()
+        start_time = now - since_s
+        slice_duration = since_s / slices
+
+        events = historical_events or []
+        parsed_events = []
+        for ev in events:
+            raw_ts = ev.get("timestamp")
+            t_epoch = 0.0
+            if isinstance(raw_ts, (int, float)):
+                t_epoch = float(raw_ts)
+            elif isinstance(raw_ts, str):
+                try:
+                    import datetime
+                    dt = datetime.datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                    t_epoch = dt.timestamp()
+                except Exception:
+                    pass
+            if t_epoch >= start_time:
+                parsed_events.append((t_epoch, ev))
+
+        slice_results = []
+        previous_edge_ids = set()
+
+        import datetime
+        for i in range(slices):
+            s_start = start_time + i * slice_duration
+            s_end = s_start + slice_duration
+            slice_evs = [ev for t, ev in parsed_events if s_start <= t < s_end]
+
+            sub = self.search_subgraph(
+                instance=host,
+                ip=ip,
+                port=port,
+                historical_events=slice_evs
+            )
+
+            current_edge_ids = {e["id"] for e in sub["edges"]}
+            new_edges = [e for e in sub["edges"] if e["id"] not in previous_edge_ids]
+            previous_edge_ids = current_edge_ids
+
+            dt_start = datetime.datetime.fromtimestamp(s_start, datetime.timezone.utc)
+            dt_end = datetime.datetime.fromtimestamp(s_end, datetime.timezone.utc)
+            time_label = f"{dt_start.strftime('%H:%M:%S')} - {dt_end.strftime('%H:%M:%S')} UTC"
+
+            slice_results.append({
+                "slice_index": i,
+                "timestamp_start": round(s_start, 2),
+                "timestamp_end": round(s_end, 2),
+                "time_label": time_label,
+                "active_nodes": sub["nodes"],
+                "active_edges": sub["edges"],
+                "total_edges": len(sub["edges"]),
+                "new_edges": new_edges,
+                "new_edges_count": len(new_edges),
+                "new_edge_keys": [e["id"] for e in new_edges],
+                "total_volume": sub["total_volume"],
+                "total_rate": round(sum(e.get("rate_1m", 0) for e in sub["edges"]), 2),
+                "bytes_per_sec": round(sub["total_volume"] * 128 / max(1.0, slice_duration), 2),
+                "mermaid": sub["mermaid"]
+            })
+
+        return {
+            "host_id": host,
+            "since": f"{since_s}s",
+            "slice_duration_s": slice_duration,
+            "total_slices": len(slice_results),
+            "slices": slice_results
+        }
+
+    def to_mermaid(
+        self,
+        only: Optional[Set[str]] = None,
+        custom_nodes: Optional[List[FleetNode]] = None,
+        custom_edges: Optional[List[FleetEdge]] = None,
+        layout: str = "LR"
+    ) -> str:
         """Generates dynamic renderable Mermaid flowchart with live edge volumes and status highlights.
 
         `only` restricts the drawing to a set of node ids -- used by subgraph()
         so a neighbourhood renders in the same visual language as the full map
         rather than in a second, divergent one.
         """
-        lines = ["flowchart LR"]
+        lines = [f"flowchart {layout}"]
 
-        visible = [n for n in self.nodes.values() if only is None or n.id in only]
+        nodes_dict = {n.id: n for n in custom_nodes} if custom_nodes is not None else self.nodes
+        edges_list = custom_edges if custom_edges is not None else list(self.edges.values())
 
-        # Subgraphs grouping. Every visible node MUST land in exactly one group:
-        # a node that is styled or made clickable but never declared as a shape
-        # is a hard mermaid parse error, and the whole diagram fails to draw.
-        # That is what happened when the documented WireGuard peers were added to
-        # the node table -- phone-full, chromebook-split, laptop and friends
-        # are type "client", matched none of the three groups below, and had no
-        # edges to auto-declare them, so `class phone_full healthy;` referred to
-        # nothing and the dashboard went blank.
+        visible = [n for n in nodes_dict.values() if only is None or n.id in only]
+
         workstations = [n for n in visible if n.type == "workstation"]
         core_services = [n for n in visible if n.type in ("server", "service")]
         gateways = [n for n in visible if n.type in ("gateway", "cloud", "external")]
@@ -1097,19 +1702,32 @@ class TrafficGraph:
         lines.append("")
         # Edges and dynamic link styles
         link_styles = []
-        drawn = [e for e in self.edges.values()
+        drawn = [e for e in edges_list
                  if only is None or (e.source in only and e.target in only)]
+
+        # Ensure all endpoints exist in declared so Mermaid never fails with syntax error
+        for e in drawn:
+            for ep in (e.source, e.target):
+                if ep not in declared:
+                    safe_ep = _safe_id(ep)
+                    lines.append(f"    {safe_ep}[\"{ep}\"]")
+                    declared.add(ep)
+
+        if not declared and not drawn:
+            lines.append("    empty[\"No active traffic records\"]")
+
         for idx, e in enumerate(drawn):
             s_id = _safe_id(e.source)
             t_id = _safe_id(e.target)
 
+            proto_str = e.display_label()
             rate_str = format_rate_1m(e.rate_1m)
             bw_str = f" • {format_bytes_rate(e.bytes_per_sec)}" if e.bytes_per_sec > 0 else ""
-            label = f"{e.protocol} ({rate_str}{bw_str})"
+            label = f"{proto_str} ({rate_str}{bw_str})".replace('"', "'")
             stroke_w = e.get_stroke_width()
 
             if e.status == "SILENT":
-                lines.append(f"    {s_id} -.->|\"SILENT ({e.protocol})\"| {t_id}")
+                lines.append(f"    {s_id} -.->|\"SILENT ({proto_str})\"| {t_id}")
                 link_styles.append(f"    linkStyle {idx} stroke:#64748b,stroke-width:1px,stroke-dasharray: 4 4;")
             elif e.status == "SURGING":
                 lines.append(f"    {s_id} -->|\"SURGE: {label}\"| {t_id}")
@@ -1137,7 +1755,7 @@ class TrafficGraph:
 
         # Style and click ONLY nodes that were declared above. Referring to an
         # undeclared id here is fatal to the whole diagram, not just to that node.
-        for n in self.nodes.values():
+        for n in visible:
             if n.id not in declared:
                 continue
             s_id = _safe_id(n.id)
@@ -1148,11 +1766,12 @@ class TrafficGraph:
 
         # Node click handlers for interactive UI inspection
         lines.append("")
-        for n in self.nodes.values():
+        for n in visible:
             if n.id not in declared:
                 continue
             s_id = _safe_id(n.id)
-            lines.append(f'    click {s_id} onNodeClick "Inspect {n.name}"')
+            n_name = (n.name or n.id).replace('"', "'")
+            lines.append(f'    click {s_id} onNodeClick "Inspect {n_name}"')
 
         return "\n".join(lines)
 

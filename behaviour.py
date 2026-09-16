@@ -148,6 +148,46 @@ def ua_anachronism(ua: str):
 ASSET_RE = re.compile(r"\.(?:css|js|png|jpe?g|gif|svg|woff2?|ico)(?:$|\?)|/favicon\.ico", re.I)
 
 
+def from_fields(kv: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """An access record that is ALREADY structured -> parse_line's shape.
+
+    A row that arrived from a Logstash pipeline (or matched a template that
+    captured these fields) does not need its text re-parsed with a regex. This
+    is the seam that lets the deception scoring read grok's output directly.
+
+    Requires ip AND path AND status together. Anything less falls through to the
+    regexes, because a half-filled dict is worse than no dict here: profile()
+    would build an actor out of absences -- no user agent, no referer, no assets
+    fetched -- which is the exact signature it scores as maximum deception. A
+    partial parse would manufacture attackers out of non-HTTP log lines.
+    """
+    if not kv:
+        return None
+    ip = kv.get("ip") or kv.get("client_ip") or kv.get("remote_ip")
+    path = kv.get("path") or kv.get("url")
+    status = kv.get("status") or kv.get("code")
+    if not (ip and path and status is not None):
+        return None
+    return {
+        "ip": str(ip),
+        # None on purpose: clf_time() only understands nginx's bracketed format,
+        # so this sends profile() to its fallback, which reads the row's own
+        # timestamp column -- and that column now holds the event's real time
+        # rather than ingest time.
+        "when": None,
+        "method": (str(kv.get("method")) if kv.get("method") else None),
+        "path": str(path),
+        "proto": (str(kv.get("proto")) if kv.get("proto") else None),
+        # str(), because _tells compares `s == "404"` with no coercion and a
+        # structured source may well carry this as an integer.
+        "status": str(status),
+        "referer": (str(kv.get("referer")) if kv.get("referer") else None),
+        "ua": (str(kv.get("ua")) if kv.get("ua") else None),
+        "sport": (str(kv.get("sport")) if kv.get("sport") else None),
+        "source": "structured",
+    }
+
+
 def parse_line(raw: str) -> Optional[Dict[str, Any]]:
     """Either access-log dialect -> a common shape. UA only where it exists."""
     m = NGINX_RE.search(raw or "")
@@ -188,7 +228,10 @@ def profile(events: List[Dict[str, Any]],
                  "referers": 0, "assets": 0, "requests": 0, "port_seen": 0})
 
     for ev in events:
-        p = parse_line(ev.get("raw") or "")
+        # Structure the shipper already derived beats re-deriving it with a
+        # regex, and is the only way an ECS row is readable at all -- its
+        # raw may be a bare message with no access-log syntax in it.
+        p = from_fields(ev.get("kv")) or parse_line(ev.get("raw") or "")
         if not p:
             continue
         a = by_ip[p["ip"]]

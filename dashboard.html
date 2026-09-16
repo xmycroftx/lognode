@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogNode Fleet Topology & Telemetry Inspector</title>
+    <title>LogNode Fleet Topology & Telemetry Viewport</title>
     <script type="module">
         import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
         window.mermaid = mermaid;
@@ -11,7 +11,8 @@
             startOnLoad: false,
             theme: 'dark',
             securityLevel: 'loose',
-            flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' }
+            suppressErrorRendering: true,
+            flowchart: { useMaxWidth: true, htmlLabels: false, curve: 'basis' }
         });
         window.dispatchEvent(new CustomEvent('mermaid-ready'));
     </script>
@@ -33,11 +34,7 @@
             --accent-purple: #a855f7;
         }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
             background-color: var(--bg-base);
@@ -45,6 +42,17 @@
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "JetBrains Mono", monospace;
             line-height: 1.5;
             padding: 20px;
+        }
+
+        /* Suppress Mermaid injected error SVGs only */
+        body > div:has(> svg.error-icon),
+        body > [id^="d"]:has(svg.error-icon) {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            width: 0 !important;
+            position: absolute !important;
+            pointer-events: none !important;
         }
 
         /* Top Navbar */
@@ -56,8 +64,10 @@
             border: 1px solid var(--border-subtle);
             border-radius: 10px;
             padding: 14px 20px;
-            margin-bottom: 20px;
+            margin-bottom: 16px;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+            flex-wrap: wrap;
+            gap: 12px;
         }
 
         .brand {
@@ -72,21 +82,21 @@
         }
 
         .brand h1 {
-            font-size: 1.25rem;
+            font-size: 1.2rem;
             font-weight: 700;
             letter-spacing: -0.02em;
             color: #fff;
         }
 
         .brand .subtitle {
-            font-size: 0.8rem;
+            font-size: 0.78rem;
             color: var(--text-muted);
         }
 
         .nav-stats {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
             flex-wrap: wrap;
         }
 
@@ -107,7 +117,6 @@
         .badge-novel   { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
         .badge-silent  { background: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
         .badge-armed   { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
-        .badge-calib   { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
 
         .btn {
             background: var(--bg-card);
@@ -135,7 +144,57 @@
             color: #34d399;
         }
 
-        /* Topology Card */
+        .btn-primary {
+            background: var(--accent-blue);
+            color: #fff;
+            border-color: var(--accent-blue);
+        }
+        .btn-primary:hover {
+            background: #2563eb;
+        }
+
+        /* Viewport Mode Switcher Tabs */
+        .mode-nav {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 6px;
+            margin-bottom: 20px;
+            overflow-x: auto;
+        }
+
+        .mode-tab {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            border: none;
+            background: none;
+            transition: all 0.15s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        .mode-tab:hover {
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .mode-tab.active {
+            background: var(--bg-card);
+            color: var(--accent-cyan);
+            border: 1px solid var(--border-subtle);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Card Container */
         .card {
             background: var(--bg-surface);
             border: 1px solid var(--border-subtle);
@@ -152,6 +211,8 @@
             margin-bottom: 14px;
             padding-bottom: 12px;
             border-bottom: 1px solid var(--border-subtle);
+            flex-wrap: wrap;
+            gap: 10px;
         }
 
         .card-title {
@@ -169,7 +230,7 @@
             font-weight: normal;
         }
 
-        #diagram-wrapper {
+        .diagram-box {
             background: var(--bg-card);
             border: 1px solid var(--border-subtle);
             border-radius: 8px;
@@ -181,19 +242,51 @@
             justify-content: center;
         }
 
-        #diagram-wrapper svg {
+        .diagram-box svg {
             max-width: 100%;
             height: auto;
         }
 
-        /* SVG Node interactive styles */
-        #diagram-wrapper .node {
-            cursor: pointer;
-            transition: transform 0.15s ease, filter 0.15s ease;
+        /* Search & Filter Toolbar */
+        .toolbar-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+            background: var(--bg-card);
+            padding: 14px;
+            border-radius: 8px;
+            border: 1px solid var(--border-subtle);
+            margin-bottom: 16px;
         }
 
-        #diagram-wrapper .node:hover {
-            filter: brightness(1.25) drop-shadow(0 0 6px var(--accent-cyan));
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .form-group label {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .form-control {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            padding: 6px 10px;
+            color: var(--text-main);
+            font-size: 0.82rem;
+            outline: none;
+            transition: border-color 0.15s ease;
+            font-family: inherit;
+        }
+
+        .form-control:focus {
+            border-color: var(--accent-cyan);
         }
 
         /* Node Selector Pills Bar */
@@ -232,6 +325,47 @@
             color: #fff;
             font-weight: 600;
             box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+        }
+
+        /* Time-Lapse Player Toolbar */
+        .player-bar {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        .player-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .timeline-slider-wrapper {
+            flex: 1;
+            min-width: 200px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .timeline-slider {
+            width: 100%;
+            cursor: pointer;
+            accent-color: var(--accent-cyan);
+        }
+
+        .timeline-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-family: "JetBrains Mono", monospace;
         }
 
         /* Inspector Panel */
@@ -282,12 +416,13 @@
             display: flex;
             gap: 8px;
             align-items: center;
+            flex-wrap: wrap;
         }
 
         /* Metrics KPI Grid */
         .metrics-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 14px;
             margin-bottom: 20px;
         }
@@ -321,7 +456,7 @@
             margin-top: 2px;
         }
 
-        /* Channels Section */
+        /* Channels / Flows Section */
         .channels-card {
             background: var(--bg-card);
             border: 1px solid var(--border-subtle);
@@ -348,40 +483,39 @@
             font-size: 0.82rem;
         }
 
-        .channel-table th {
+        .channel-table th, .channel-table td {
+            padding: 8px 12px;
             text-align: left;
-            padding: 8px;
-            color: var(--text-dim);
             border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .channel-table th {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            text-transform: uppercase;
             font-weight: 600;
         }
 
-        .channel-table td {
-            padding: 8px;
-            border-bottom: 1px solid rgba(36, 44, 61, 0.4);
-            font-family: "JetBrains Mono", monospace;
-        }
-
-        /* Logs Explorer */
+        /* Logs Stream */
         .logs-toolbar {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 14px;
+            margin-bottom: 12px;
+            gap: 10px;
             flex-wrap: wrap;
         }
 
         .search-box {
-            display: flex;
-            align-items: center;
+            flex: 1;
+            min-width: 250px;
             background: var(--bg-card);
             border: 1px solid var(--border-subtle);
             border-radius: 6px;
             padding: 6px 12px;
+            display: flex;
+            align-items: center;
             gap: 8px;
-            flex: 1;
-            max-width: 450px;
         }
 
         .search-box input {
@@ -394,31 +528,33 @@
             font-family: inherit;
         }
 
-        .search-box input::placeholder {
-            color: var(--text-dim);
-        }
-
         .logs-feed {
-            background: #0d1117;
+            background: #0c0f17;
             border: 1px solid var(--border-subtle);
             border-radius: 8px;
             padding: 12px;
-            max-height: 520px;
+            max-height: 480px;
             overflow-y: auto;
             font-family: "JetBrains Mono", monospace;
-            font-size: 0.8rem;
+            font-size: 0.78rem;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
         }
 
         .log-entry {
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-            padding: 8px 6px;
-            cursor: pointer;
-            transition: background 0.1s ease;
+            background: rgba(22, 27, 38, 0.6);
+            border: 1px solid transparent;
             border-radius: 4px;
+            padding: 8px 10px;
+            line-height: 1.4;
+            cursor: pointer;
+            transition: all 0.15s ease;
         }
 
         .log-entry:hover {
-            background: rgba(255, 255, 255, 0.03);
+            border-color: var(--border-highlight);
+            background: rgba(30, 41, 59, 0.8);
         }
 
         .log-header {
@@ -426,13 +562,10 @@
             align-items: center;
             gap: 8px;
             margin-bottom: 4px;
-            font-size: 0.75rem;
+            font-size: 0.72rem;
         }
 
-        .log-time {
-            color: var(--text-dim);
-        }
-
+        .log-time { color: var(--text-muted); }
         .log-event {
             background: rgba(56, 189, 248, 0.15);
             color: var(--accent-cyan);
@@ -441,24 +574,15 @@
             font-weight: 600;
         }
 
-        .log-latency {
-            color: var(--text-dim);
-            font-size: 0.7rem;
-        }
-
         .log-text {
-            color: #cbd5e1;
-            white-space: pre-wrap;
+            color: #f1f5f9;
             word-break: break-all;
-            line-height: 1.4;
         }
 
         .log-details {
             margin-top: 8px;
-            padding: 8px;
-            background: rgba(0, 0, 0, 0.35);
-            border-radius: 6px;
-            border: 1px dashed var(--border-subtle);
+            padding-top: 8px;
+            border-top: 1px dashed var(--border-subtle);
             display: none;
         }
 
@@ -468,35 +592,92 @@
 
         .kv-badge {
             display: inline-block;
-            background: var(--bg-card);
-            border: 1px solid var(--border-subtle);
-            padding: 2px 6px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 4px;
+            padding: 2px 6px;
+            margin: 2px 4px 2px 0;
             font-size: 0.72rem;
-            margin: 2px;
-            color: #93c5fd;
+            color: #f8fafc;
+        }
+
+        .kv-badge b { color: var(--accent-cyan); }
+
+        .empty-state {
+            color: var(--text-dim);
+            text-align: center;
+            padding: 30px;
+            font-size: 0.85rem;
         }
 
         .pulse-dot {
             width: 8px;
             height: 8px;
+            background: #10b981;
             border-radius: 50%;
-            background: var(--accent-emerald);
             display: inline-block;
-            box-shadow: 0 0 8px var(--accent-emerald);
-            animation: pulse 1.5s infinite;
+            box-shadow: 0 0 8px #10b981;
+            animation: pulse 2s infinite;
         }
 
         @keyframes pulse {
-            0% { opacity: 0.4; }
-            50% { opacity: 1; }
-            100% { opacity: 0.4; }
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
         }
 
-        .empty-state {
-            text-align: center;
-            padding: 40px;
-            color: var(--text-dim);
+        /* GraphQL Explorer embedded pane */
+        .gql-pane {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 14px;
+            height: 520px;
+        }
+
+        .gql-editor-box, .gql-result-box {
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .gql-header {
+            padding: 8px 14px;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--border-subtle);
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .gql-textarea {
+            flex: 1;
+            background: #0a0c10;
+            color: var(--accent-cyan);
+            border: none;
+            padding: 12px;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px;
+            line-height: 1.4;
+            resize: none;
+            outline: none;
+        }
+
+        .gql-pre {
+            flex: 1;
+            background: #090c12;
+            color: #a7f3d0;
+            padding: 12px;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 11.5px;
+            line-height: 1.4;
+            overflow: auto;
         }
     </style>
 </head>
@@ -507,51 +688,288 @@
         <div class="brand">
             <div class="brand-icon">⚡</div>
             <div>
-                <h1>LogNode Fleet Topology & Telemetry Inspector</h1>
-                <div class="subtitle">Real-time dynamic graph, bandwidth weights & workstation stream inspector</div>
+                <h1>LogNode Environment Viewport & Telemetry Engine</h1>
+                <div class="subtitle">Live Directed Flows • Subgraph Incident Search • Single-Host Data Flows & Time-Lapse</div>
             </div>
         </div>
         <div class="nav-stats">
-            <a href="/threats" style="color:var(--accent-rose);text-decoration:none;border:1px solid var(--border-subtle);border-radius:999px;padding:5px 14px;font-size:12px;margin-right:6px">Threats</a>
-            <a href="/search" style="color:var(--accent-cyan);text-decoration:none;
-               border:1px solid var(--border-subtle);border-radius:999px;
-               padding:5px 14px;font-size:12px;margin-right:6px">Search logs</a>
+            <a href="/threats" style="color:var(--accent-rose);text-decoration:none;border:1px solid var(--border-subtle);border-radius:999px;padding:5px 14px;font-size:12px">Threats</a>
+            <a href="/search" style="color:var(--accent-cyan);text-decoration:none;border:1px solid var(--border-subtle);border-radius:999px;padding:5px 14px;font-size:12px">Search</a>
             <span id="stat-fleet" class="badge badge-healthy">● Fleet Healthy</span>
             <span id="stat-armed" class="badge badge-armed">● Armed</span>
             <span id="stat-shifts" class="badge badge-healthy">0 Shifts</span>
-            <button id="btn-refresh-all" class="btn" onclick="refreshAll()">🔄 Refresh</button>
+            <button id="btn-refresh-all" class="btn" onclick="refreshCurrentView()">🔄 Refresh</button>
         </div>
     </div>
 
-    <!-- Topology Card -->
-    <div class="card">
-        <div class="card-header">
-            <div class="card-title">
-                Fleet Communication Topology
-                <span class="hint">⚡ Click any node to inspect workstation logs & metrics</span>
-            </div>
-            <div style="font-size:0.8rem; color:var(--text-muted);">
-                Auto-refreshes every 15s
-            </div>
-        </div>
+    <!-- Viewport Mode Navigation Tabs -->
+    <div class="mode-nav">
+        <button id="tab-topology" class="mode-tab active" onclick="switchMode('topology')">
+            <span>🌐</span> Org Topology Map
+        </button>
+        <button id="tab-subgraph" class="mode-tab" onclick="switchMode('subgraph')">
+            <span>🔬</span> Incident Subgraph Search
+        </button>
+        <button id="tab-hostflow" class="mode-tab" onclick="switchMode('hostflow')">
+            <span>⏱️</span> Host Flows & Time-Lapse
+        </button>
+        <button id="tab-graphql" class="mode-tab" onclick="switchMode('graphql')">
+            <span>⚡</span> GraphQL IDE & Console
+        </button>
+    </div>
 
-        <div id="diagram-wrapper">
-            <div class="empty-state">Loading fleet graph...</div>
-        </div>
+    <!-- VIEW 1: Org Topology Overview -->
+    <div id="view-topology" class="view-container">
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    Fleet Architecture & Active Telemetry Links
+                    <span class="hint">⚡ Click any node to inspect workstation logs & metrics</span>
+                </div>
+                <div style="font-size:0.8rem; color:var(--text-muted)">
+                    Auto-refreshes every 15s
+                </div>
+            </div>
 
-        <div id="node-pills" class="pill-bar">
-            <!-- Populated dynamically -->
+            <div id="diagram-wrapper" class="diagram-box">
+                <div class="empty-state">Loading fleet graph...</div>
+            </div>
+
+            <div id="node-pills" class="pill-bar">
+                <!-- Populated dynamically -->
+            </div>
         </div>
     </div>
 
-    <!-- Workstation Telemetry Inspector -->
+    <!-- VIEW 2: Incident Subgraph Search -->
+    <div id="view-subgraph" class="view-container" style="display:none">
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span>Incident Subgraph Query Workbench</span>
+                    <span class="hint">Filter communication paths by IP, Port, Protocol, Host, or Time Window</span>
+                </div>
+                <div>
+                    <span id="subgraph-stats" class="badge badge-armed">Ready</span>
+                </div>
+            </div>
+
+            <!-- Filter Toolbar -->
+            <div class="toolbar-grid">
+                <div class="form-group">
+                    <label>IP / Subnet</label>
+                    <input type="text" id="filter-ip" class="form-control" placeholder="192.0.2.10 or CIDR" onkeyup="if(event.key==='Enter') executeSubgraphSearch()">
+                </div>
+                <div class="form-group">
+                    <label>Port</label>
+                    <input type="text" id="filter-port" class="form-control" placeholder="443, 22, 9514..." onkeyup="if(event.key==='Enter') executeSubgraphSearch()">
+                </div>
+                <div class="form-group">
+                    <label>Protocol</label>
+                    <select id="filter-proto" class="form-control" onchange="executeSubgraphSearch()">
+                        <option value="">All Protocols</option>
+                        <option value="tcp">TCP (Sockets)</option>
+                        <option value="udp">UDP</option>
+                        <option value="ssh">SSH (22)</option>
+                        <option value="dns">DNS (53)</option>
+                        <option value="http">HTTP / REST</option>
+                        <option value="loki">Loki Stream</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Host / Instance</label>
+                    <select id="filter-host" class="form-control" onchange="executeSubgraphSearch()">
+                        <option value="">All Fleet Hosts</option>
+                        <option value="hub">hub (Icecave)</option>
+                        <option value="laptop">laptop (Desktop)</option>
+                        <option value="laptop">laptop (M4 Pro)</option>
+                        <option value="app-server">app-server</option>
+                        <option value="vault-host">vault-host</option>
+                        <option value="app-server">app-server</option>
+                        <option value="app-server">app-server</option>
+                        <option value="app-server">app-server</option>
+                        <option value="app-server">app-server (Gateway)</option>
+                        <option value="opnsense">opnsense (Firewall)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Process</label>
+                    <input type="text" id="filter-proc" class="form-control" placeholder="alloy, sshd, python3..." onkeyup="if(event.key==='Enter') executeSubgraphSearch()">
+                </div>
+                <div class="form-group">
+                    <label>Time Window</label>
+                    <select id="filter-since" class="form-control" onchange="executeSubgraphSearch()">
+                        <option value="5m">Last 5 min</option>
+                        <option value="15m">Last 15 min</option>
+                        <option value="1h" selected>Last 1 hour</option>
+                        <option value="6h">Last 6 hours</option>
+                        <option value="24h">Last 24 hours</option>
+                    </select>
+                </div>
+                <div class="form-group" style="justify-content:flex-end">
+                    <label>&nbsp;</label>
+                    <div style="display:flex; gap:6px;">
+                        <button class="btn btn-primary" style="flex:1" onclick="executeSubgraphSearch()">🔍 Search</button>
+                        <button class="btn" onclick="resetSubgraphSearch()">↺ Reset</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Subgraph Visual Canvas -->
+            <div id="subgraph-diagram-wrapper" class="diagram-box">
+                <div class="empty-state">Select filters above and click 'Search' to isolate an incident subgraph.</div>
+            </div>
+
+            <!-- Subgraph Flows Table -->
+            <div id="subgraph-table-card" class="channels-card" style="margin-top:16px; display:none;">
+                <div class="channels-title">
+                    <span id="subgraph-flows-title">Matched Communication Paths</span>
+                    <span id="subgraph-flows-count" style="color:var(--accent-cyan)">0 flows</span>
+                </div>
+                <table class="channel-table">
+                    <thead>
+                        <tr>
+                            <th>Source</th>
+                            <th>Target</th>
+                            <th>Protocol / Port</th>
+                            <th>Volume</th>
+                            <th>Rate</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="subgraph-tbody"></tbody>
+                </table>
+            </div>
+
+            <!-- Correlated Incident Log Stream -->
+            <div id="subgraph-logs-section" style="margin-top:16px; display:none;">
+                <div class="channels-title" style="margin-bottom:8px;">
+                    <span>Correlated Incident Forensic Logs</span>
+                    <span id="subgraph-logs-count" style="color:var(--accent-emerald)">0 events</span>
+                </div>
+                <div id="subgraph-logs-feed" class="logs-feed" style="max-height:300px;">
+                    <div class="empty-state">No matching incident logs.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- VIEW 3: Host Data Flows & Time-Lapse -->
+    <div id="view-hostflow" class="view-container" style="display:none">
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span id="hf-title">Host Flow Architecture & Temporal Time-Lapse</span>
+                    <span class="hint">Inspect process-level ingress/egress and scrub through connection evolution</span>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <button id="btn-hf-mode-flow" class="btn btn-active" onclick="switchHfSubMode('flow')">📐 Process Flows</button>
+                    <button id="btn-hf-mode-tl" class="btn" onclick="switchHfSubMode('timelapse')">⏱️ Time-Lapse Replay</button>
+                </div>
+            </div>
+
+            <!-- Host Selector Bar -->
+            <div id="hf-host-pills" class="pill-bar" style="margin-bottom:14px; margin-top:0;">
+                <!-- Host buttons populated dynamically -->
+            </div>
+
+            <!-- Time-Lapse Player Controls (only visible in timelapse sub-mode) -->
+            <div id="timelapse-player-bar" class="player-bar" style="display:none">
+                <div class="player-controls">
+                    <button id="btn-tl-prev" class="btn" onclick="stepTimeLapse(-1)" title="Step Back">⏮</button>
+                    <button id="btn-tl-play" class="btn btn-primary" onclick="toggleTimeLapsePlay()">▶ Play</button>
+                    <button id="btn-tl-next" class="btn" onclick="stepTimeLapse(1)" title="Step Forward">⏭</button>
+                    <select id="tl-speed" class="form-control" style="padding:4px 8px; width:75px;" onchange="changeTimeLapseSpeed()">
+                        <option value="1500">1.0x</option>
+                        <option value="800">2.0x</option>
+                        <option value="400">4.0x</option>
+                        <option value="3000">0.5x</option>
+                    </select>
+                </div>
+                <div class="timeline-slider-wrapper">
+                    <div class="timeline-labels">
+                        <span id="tl-label-current">Frame 1/12</span>
+                        <span id="tl-label-delta" style="color:var(--accent-amber); font-weight:600;"></span>
+                        <span id="tl-label-time">00:00 - 00:00 UTC</span>
+                    </div>
+                    <input type="range" id="tl-slider" class="timeline-slider" min="0" max="11" value="0" oninput="onTimeLapseScrub(this.value)">
+                </div>
+            </div>
+
+            <!-- Host Flow Diagram Canvas -->
+            <div id="hf-diagram-wrapper" class="diagram-box">
+                <div class="empty-state">Select a host above to inspect data flow architecture.</div>
+            </div>
+
+            <!-- Host KPI Cards -->
+            <div class="metrics-grid" style="margin-top:16px;">
+                <div class="metric-card">
+                    <div class="metric-label">Inbound Traffic</div>
+                    <div id="hf-metric-in-rate" class="metric-value">0 /m</div>
+                    <div id="hf-metric-in-bw" class="metric-sub">0 B/s</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Outbound Traffic</div>
+                    <div id="hf-metric-out-rate" class="metric-value">0 /m</div>
+                    <div id="hf-metric-out-bw" class="metric-sub">0 B/s</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Active Processes</div>
+                    <div id="hf-metric-procs" class="metric-value">0</div>
+                    <div id="hf-metric-procs-sub" class="metric-sub">Sockets bound</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Connected Links</div>
+                    <div id="hf-metric-links" class="metric-value">0</div>
+                    <div id="hf-metric-links-sub" class="metric-sub">Inbound & Outbound</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- VIEW 4: GraphQL Console -->
+    <div id="view-graphql" class="view-container" style="display:none">
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span>Interactive GraphQL Console</span>
+                    <span class="hint">Execute arbitrary queries against schema.graphql</span>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <select id="gql-preset-select" class="form-control" onchange="applyGqlPreset()">
+                        <option value="incident">Query: Incident Subgraph</option>
+                        <option value="host">Query: Host Data Flows</option>
+                        <option value="timelapse">Query: Time-Lapse Slices</option>
+                        <option value="fleet">Query: Fleet Summary</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="runGraphqlQuery()">▶ Run Query</button>
+                </div>
+            </div>
+
+            <div class="gql-pane">
+                <div class="gql-editor-box">
+                    <div class="gql-header">GraphQL Query</div>
+                    <textarea id="gql-input" class="gql-textarea" spellcheck="false"></textarea>
+                </div>
+                <div class="gql-result-box">
+                    <div class="gql-header">
+                        <span>Result</span>
+                        <span id="gql-timing" style="color:var(--accent-cyan)">Ready</span>
+                    </div>
+                    <pre id="gql-output" class="gql-pre">// Click 'Run Query' to evaluate</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Universal Workstation Telemetry Inspector (Persistent across modes) -->
     <div id="inspector" class="inspector-panel">
         <div class="inspector-hero">
             <div class="node-headline">
                 <div id="insp-icon" class="node-icon">💻</div>
                 <div class="node-info">
-                    <h2 id="insp-name">Select a Workstation</h2>
-                    <div id="insp-role" class="role-desc">Click any node above to inspect telemetry</div>
+                    <h2 id="insp-name">Select a Host or Service</h2>
+                    <div id="insp-role" class="role-desc">Click any node in any diagram above to inspect live telemetry</div>
                 </div>
             </div>
             <div class="node-tags">
@@ -564,22 +982,22 @@
         <!-- Metrics KPI Grid -->
         <div class="metrics-grid">
             <div class="metric-card">
-                <div class="metric-label">Inbound Traffic</div>
+                <div class="metric-label">Inbound Rate</div>
                 <div id="metric-in-rate" class="metric-value">0 /m</div>
                 <div id="metric-in-bw" class="metric-sub">0 B/s</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">Outbound Traffic</div>
+                <div class="metric-label">Outbound Rate</div>
                 <div id="metric-out-rate" class="metric-value">0 /m</div>
                 <div id="metric-out-bw" class="metric-sub">0 B/s</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">Connected Links</div>
+                <div class="metric-label">Connected Edges</div>
                 <div id="metric-links" class="metric-value">0</div>
-                <div id="metric-links-sub" class="metric-sub">Active edges</div>
+                <div id="metric-links-sub" class="metric-sub">0 in / 0 out</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">Active Shifts</div>
+                <div class="metric-label">Topological Shifts</div>
                 <div id="metric-shifts" class="metric-value">0</div>
                 <div id="metric-shifts-sub" class="metric-sub">Nominal</div>
             </div>
@@ -588,7 +1006,7 @@
         <!-- Connected Channels -->
         <div id="channels-section" class="channels-card">
             <div class="channels-title">
-                <span>Active Communication Flows</span>
+                <span>Direct Node Channels</span>
                 <span id="channels-count" style="color:var(--accent-cyan)">0 flows</span>
             </div>
             <table class="channel-table">
@@ -602,17 +1020,15 @@
                         <th>Status</th>
                     </tr>
                 </thead>
-                <tbody id="channels-tbody">
-                    <!-- Channels rows populated here -->
-                </tbody>
+                <tbody id="channels-tbody"></tbody>
             </table>
         </div>
 
-        <!-- Workstation Logs Explorer -->
+        <!-- Node Logs Explorer -->
         <div class="logs-toolbar">
             <div class="search-box">
                 <span>🔍</span>
-                <input type="text" id="log-search" placeholder="Search & grep workstation logs..." onkeyup="if(event.key==='Enter') applyLogFilter()">
+                <input type="text" id="log-search" placeholder="Search & grep node logs..." onkeyup="if(event.key==='Enter') applyLogFilter()">
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
                 <select id="log-limit" class="btn" onchange="applyLogFilter()">
@@ -633,21 +1049,41 @@
     </div>
 
     <script>
+        // Global State
+        let currentMode = 'topology';
         let graphData = null;
-        let selectedNodeId = 'laptop';
+        let selectedNodeId = 'hub';
         let liveTailActive = true;
         let liveTailTimer = null;
         let diagramTimer = null;
 
+        // Host Flow & Time-Lapse State
+        let hfSelectedHost = 'hub';
+        let hfSubMode = 'flow'; // 'flow' or 'timelapse'
+        let timeLapseData = null;
+        let timeLapsePlaying = false;
+        let timeLapseTimer = null;
+        let timeLapseSpeed = 1500;
+
+        const FLEET_HOSTS = [
+            'hub', 'laptop', 'laptop', 'app-server', 'vault-host',
+            'app-server', 'app-server', 'app-server',
+            'app-server', 'opnsense'
+        ];
+
         function getNodeIcon(type, id) {
+            id = (id || '').toLowerCase();
             if (id.includes('laptop')) return '💻';
             if (id.includes('laptop')) return '🖥️';
             if (id.includes('hub')) return '🗄️';
             if (id.includes('app-server')) return '☁️';
+            if (id.includes('vault')) return '🔒';
+            if (id.includes('app-server')) return '⚔️';
             if (id.includes('app-server')) return '🌐';
             if (id.includes('opnsense')) return '🛡️';
             if (id.includes('starlink')) return '🛰️';
             if (type === 'service') return '⚙️';
+            if (type === 'external') return '🌍';
             return '🔌';
         }
 
@@ -658,6 +1094,71 @@
             return '0 B/s';
         }
 
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        function formatFlowProto(e) {
+            if (!e) return '';
+            if (e.display_label) return escapeHtml(e.display_label);
+            const port = e.port || (e.channel && e.channel.startsWith('port_') ? e.channel.slice(5) : (e.metadata && e.metadata.port));
+            const proto = (e.protocol || '').toLowerCase();
+            if (proto === 'tcp' || proto === 'udp') {
+                if (port) return escapeHtml(`${proto}:${port}`);
+                if (e.channel && e.channel !== 'socket' && e.channel !== 'traffic') return escapeHtml(`${proto}:${e.channel}`);
+                return escapeHtml(proto);
+            }
+            if (port && !['80', '443', '22', '53'].includes(String(port))) {
+                return escapeHtml(`${e.protocol}:${port}`);
+            }
+            return escapeHtml((e.channel && e.channel !== 'socket' && e.channel !== 'traffic') ? `${e.protocol}:${e.channel}` : (e.protocol || 'traffic'));
+        }
+
+        // Mode Switching
+        function switchMode(mode) {
+            currentMode = mode;
+            ['topology', 'subgraph', 'hostflow', 'graphql'].forEach(m => {
+                document.getElementById('view-' + m).style.display = (m === mode) ? 'block' : 'none';
+                document.getElementById('tab-' + m).className = (m === mode) ? 'mode-tab active' : 'mode-tab';
+            });
+
+            if (mode === 'topology') {
+                renderDiagram();
+            } else if (mode === 'subgraph') {
+                // If subgraph hasn't been searched yet, populate initial defaults
+                if (!document.getElementById('subgraph-diagram-wrapper').querySelector('svg')) {
+                    executeSubgraphSearch();
+                }
+            } else if (mode === 'hostflow') {
+                renderHostFlowView();
+            } else if (mode === 'graphql') {
+                if (!document.getElementById('gql-input').value.trim()) {
+                    applyGqlPreset();
+                }
+            }
+        }
+
+        function refreshCurrentView() {
+            fetchGraphData();
+            if (currentMode === 'topology') {
+                renderDiagram();
+            } else if (currentMode === 'subgraph') {
+                executeSubgraphSearch();
+            } else if (currentMode === 'hostflow') {
+                renderHostFlowView();
+            }
+            if (selectedNodeId) {
+                fetchNodeLogs(selectedNodeId);
+            }
+        }
+
+        // Global Fetch Graph Data
         async function fetchGraphData() {
             try {
                 const res = await fetch('/graph');
@@ -665,6 +1166,7 @@
                 graphData = await res.json();
                 renderNavStats();
                 renderNodePills();
+                renderHfHostPills();
                 if (selectedNodeId) {
                     renderInspector(selectedNodeId);
                 }
@@ -702,44 +1204,89 @@
             });
         }
 
-        async function renderDiagram() {
-            try {
-                const res = await fetch('/graph/mermaid');
-                if (!res.ok) return;
-                const chartText = await res.text();
-                const wrapper = document.getElementById('diagram-wrapper');
+        function renderHfHostPills() {
+            const container = document.getElementById('hf-host-pills');
+            container.innerHTML = '';
+            FLEET_HOSTS.forEach(h => {
+                const pill = document.createElement('div');
+                pill.className = `node-pill ${h === hfSelectedHost ? 'active' : ''}`;
+                pill.innerHTML = `<span>${getNodeIcon('server', h)}</span> <span>${h}</span>`;
+                pill.onclick = () => selectHfHost(h);
+                container.appendChild(pill);
+            });
+        }
 
-                if (window.mermaid) {
-                    const id = 'mermaid-svg-' + Date.now();
-                    const { svg } = await window.mermaid.render(id, chartText);
-                    wrapper.innerHTML = svg;
-                    attachSvgClickHandlers();
-                } else {
-                    // Silence here is the bug: if the mermaid module never
-                    // loaded, the wrapper just stayed empty and the dashboard
-                    // looked like it had no graph rather than a broken one.
-                    wrapper.innerHTML = '<div style="padding:24px;color:#fca5a5;' +
-                        'font-family:ui-monospace,monospace;font-size:13px;line-height:1.6">' +
-                        '<b>Diagram library did not load.</b><br>' +
-                        'mermaid is fetched from cdn.jsdelivr.net; if this browser ' +
-                        'cannot reach it, the graph cannot draw.<br>' +
-                        'The data is fine — try <code>/graph</code> or ' +
-                        '<code>/graph/mermaid</code> directly.</div>';
+        function cleanupMermaidErrors() {
+            try {
+                document.querySelectorAll('body > [id^="d"]').forEach(el => {
+                    if (el.classList.contains('error-icon') || (el.textContent && (el.textContent.includes('Syntax error') || el.textContent.includes('Lexical error') || el.textContent.includes('Parse error')))) {
+                        el.remove();
+                    }
+                });
+            } catch (e) {}
+        }
+
+        async function renderMermaidSafe(container, idPrefix, chartText, fallbackHtml) {
+            if (!container) return false;
+            cleanupMermaidErrors();
+
+            if (!chartText || !chartText.trim() || chartText.trim().startsWith('<') || (!chartText.includes('flowchart') && !chartText.includes('graph '))) {
+                container.innerHTML = fallbackHtml || '<div class="empty-state">No graph data available for this view.</div>';
+                return false;
+            }
+
+            if (!window.mermaid) {
+                container.innerHTML = '<div class="empty-state">Diagram renderer initializing...</div>';
+                return false;
+            }
+
+            const renderId = idPrefix + '-' + Date.now();
+
+            try {
+                // Syntax parse pre-check prevents Mermaid from appending error DOM elements
+                await window.mermaid.parse(chartText);
+                let { svg } = await window.mermaid.render(renderId, chartText);
+                if (svg) {
+                    svg = svg.replace(/translate\([^)]*(?:NaN|undefined)[^)]*\)/g, 'translate(0, 0)');
                 }
-            } catch (e) {
-                console.error('Failed to render mermaid diagram:', e);
-                const w = document.getElementById('diagram-wrapper');
-                if (w) w.innerHTML = '<div style="padding:24px;color:#fca5a5;' +
-                    'font-family:ui-monospace,monospace;font-size:13px">' +
-                    'Diagram failed to render: ' + String(e && e.message || e) + '</div>';
+                container.innerHTML = svg;
+                attachSvgClickHandlers(container);
+                cleanupMermaidErrors();
+                return true;
+            } catch (err) {
+                console.error(`Mermaid render failed for ${renderId}:`, err);
+                cleanupMermaidErrors();
+                const orphan = document.getElementById('d' + renderId);
+                if (orphan) orphan.remove();
+                container.innerHTML = fallbackHtml || '<div class="empty-state">Diagram syntax error or render failure.</div>';
+                return false;
             }
         }
 
-        function attachSvgClickHandlers() {
-            const svgNodes = document.querySelectorAll('#diagram-wrapper .node');
+        async function renderDiagram() {
+            const wrapper = document.getElementById('diagram-wrapper');
+            try {
+                const res = await fetch('/graph/mermaid?format=text', {
+                    headers: { 'Accept': 'text/plain' },
+                    cache: 'no-store'
+                });
+                if (!res.ok) {
+                    wrapper.innerHTML = '<div class="empty-state">Topology diagram unavailable. Retrying...</div>';
+                    return;
+                }
+                const chartText = await res.text();
+                await renderMermaidSafe(wrapper, 'mermaid-top', chartText, '<div class="empty-state">Topology diagram unavailable. Retrying...</div>');
+            } catch (e) {
+                console.error('Failed to render mermaid diagram:', e);
+                wrapper.innerHTML = '<div class="empty-state">Topology diagram unavailable. Retrying...</div>';
+            }
+        }
+
+        function attachSvgClickHandlers(container) {
+            const svgNodes = container.querySelectorAll('.node');
             svgNodes.forEach(el => {
                 el.style.cursor = 'pointer';
-                el.onclick = (e) => {
+                el.onclick = () => {
                     const text = el.textContent || '';
                     if (graphData && graphData.nodes) {
                         for (const n of graphData.nodes) {
@@ -753,7 +1300,6 @@
             });
         }
 
-        // Global callback invoked directly by Mermaid click directives
         window.onNodeClick = function(nodeId) {
             selectNode(nodeId);
         };
@@ -772,28 +1318,25 @@
 
             document.getElementById('insp-icon').textContent = getNodeIcon(node.type, node.id);
             document.getElementById('insp-name').textContent = node.name;
-            const ipText = (node.ips && node.ips.length > 0) ? node.ips.join(' • ') : (node.ip || 'Internal / Cloud');
+            const ipText = (node.ips && node.ips.length > 0) ? node.ips.join(' • ') : (node.ip || 'Internal / Mesh');
             document.getElementById('insp-ip').textContent = ipText;
-            document.getElementById('insp-type').textContent = node.type.toUpperCase();
+            document.getElementById('insp-type').textContent = (node.type || 'client').toUpperCase();
 
             const statusBadge = document.getElementById('insp-status');
-            statusBadge.textContent = node.status;
+            statusBadge.textContent = node.status || 'HEALTHY';
             statusBadge.className = `badge ${node.status === 'HEALTHY' ? 'badge-healthy' : 'badge-surging'}`;
 
-            // Calculate Inbound & Outbound Traffic
             const edges = graphData.edges || [];
-            const inEdges = edges.filter(e => e.target === nodeId);
-            const outEdges = edges.filter(e => e.source === nodeId);
+            const inEdges = edges.filter(e => e && (e.target === nodeId || (typeof e.target === 'string' && e.target.startsWith(nodeId + ':'))));
+            const outEdges = edges.filter(e => e && (e.source === nodeId || (typeof e.source === 'string' && e.source.startsWith(nodeId + ':'))));
 
             const inRate = inEdges.reduce((acc, e) => acc + (e.rate_1m || 0), 0);
             const inBw = inEdges.reduce((acc, e) => acc + (e.bytes_per_sec || 0), 0);
-
             const outRate = outEdges.reduce((acc, e) => acc + (e.rate_1m || 0), 0);
             const outBw = outEdges.reduce((acc, e) => acc + (e.bytes_per_sec || 0), 0);
 
             document.getElementById('metric-in-rate').textContent = `${Math.round(inRate)} /m`;
             document.getElementById('metric-in-bw').textContent = formatBytes(inBw);
-
             document.getElementById('metric-out-rate').textContent = `${Math.round(outRate)} /m`;
             document.getElementById('metric-out-bw').textContent = formatBytes(outBw);
 
@@ -829,9 +1372,9 @@
                     row.innerHTML = `
                         <td style="color:${e.dir === 'INCOMING' ? 'var(--accent-cyan)' : 'var(--accent-purple)'}">${dirArrow}</td>
                         <td style="font-weight:600">${peer}</td>
-                        <td>${e.protocol}:${e.channel}</td>
-                        <td>${Math.round(e.rate_1m)}/m</td>
-                        <td>${formatBytes(e.bytes_per_sec)}</td>
+                        <td>${formatFlowProto(e)}</td>
+                        <td>${Math.round(e.rate_1m || 0)}/m</td>
+                        <td>${formatBytes(e.bytes_per_sec || 0)}</td>
                         <td><span class="badge ${statusClass}">${e.status}</span></td>
                     `;
                     tbody.appendChild(row);
@@ -845,7 +1388,7 @@
             const query = document.getElementById('log-search').value.trim();
 
             let url = `/query?limit=${limit}`;
-            const hostInstances = ['laptop', 'laptop', 'hub', 'app-server', 'app-server'];
+            const hostInstances = FLEET_HOSTS;
 
             if (hostInstances.includes(nodeId)) {
                 url += `&instance=${encodeURIComponent(nodeId)}`;
@@ -873,61 +1416,55 @@
         function renderLogs(events) {
             const feed = document.getElementById('logs-feed');
             if (!events || events.length === 0) {
-                feed.innerHTML = '<div class="empty-state">No matching loglines found for this workstation in the current window.</div>';
+                feed.innerHTML = '<div class="empty-state">No matching loglines found for this node.</div>';
                 return;
             }
 
             feed.innerHTML = '';
             events.forEach(ev => {
-                const entry = document.createElement('div');
-                entry.className = 'log-entry';
-                entry.onclick = () => entry.classList.toggle('expanded');
-
-                const t = new Date(ev.timestamp);
-                const timeStr = t.toLocaleTimeString() + '.' + String(t.getMilliseconds()).padStart(3, '0');
-
-                let kvBadges = '';
-                if (ev.kv && Object.keys(ev.kv).length > 0) {
-                    for (const [k, v] of Object.entries(ev.kv)) {
-                        kvBadges += `<span class="kv-badge"><b>${k}</b>: ${v}</span> `;
-                    }
-                } else {
-                    kvBadges = '<span style="color:var(--text-dim)">No structured KV extracted</span>';
-                }
-
-                let labelsBadges = '';
-                if (ev.labels) {
-                    for (const [k, v] of Object.entries(ev.labels)) {
-                        labelsBadges += `<span class="kv-badge" style="color:#a7f3d0"><b>${k}</b>: ${v}</span> `;
-                    }
-                }
-
-                entry.innerHTML = `
-                    <div class="log-header">
-                        <span class="log-time">${timeStr}</span>
-                        <span class="log-event">${ev.event || 'unstructured'}</span>
-                        <span class="log-latency">${ev.latency_us ? ev.latency_us + 'µs' : ''}</span>
-                    </div>
-                    <div class="log-text">${escapeHtml(ev.raw)}</div>
-                    <div class="log-details">
-                        <div style="font-size:0.7rem; color:var(--text-muted); margin-bottom:4px"><b>STRUCTURED FIELDS:</b></div>
-                        <div>${kvBadges}</div>
-                        <div style="font-size:0.7rem; color:var(--text-muted); margin: 6px 0 4px"><b>STREAM LABELS:</b></div>
-                        <div>${labelsBadges}</div>
-                    </div>
-                `;
-                feed.appendChild(entry);
+                feed.appendChild(createLogElement(ev));
             });
         }
 
-        function escapeHtml(str) {
-            if (!str) return '';
-            return str
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;")
-                .replace(/"/g, "&quot;")
-                .replace(/'/g, "&#039;");
+        function createLogElement(ev) {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.onclick = () => entry.classList.toggle('expanded');
+
+            const t = new Date(ev.timestamp);
+            const timeStr = t.toLocaleTimeString() + '.' + String(t.getMilliseconds()).padStart(3, '0');
+
+            let kvBadges = '';
+            if (ev.kv && Object.keys(ev.kv).length > 0) {
+                for (const [k, v] of Object.entries(ev.kv)) {
+                    kvBadges += `<span class="kv-badge"><b>${k}</b>: ${v}</span> `;
+                }
+            } else {
+                kvBadges = '<span style="color:var(--text-dim)">No structured KV extracted</span>';
+            }
+
+            let labelsBadges = '';
+            if (ev.labels) {
+                for (const [k, v] of Object.entries(ev.labels)) {
+                    labelsBadges += `<span class="kv-badge" style="color:#a7f3d0"><b>${k}</b>: ${v}</span> `;
+                }
+            }
+
+            entry.innerHTML = `
+                <div class="log-header">
+                    <span class="log-time">${timeStr}</span>
+                    <span class="log-event">${ev.event || 'unstructured'}</span>
+                    <span style="color:var(--text-dim)">${ev.latency_us ? ev.latency_us + 'µs' : ''}</span>
+                </div>
+                <div class="log-text">${escapeHtml(ev.raw)}</div>
+                <div class="log-details">
+                    <div style="font-size:0.7rem; color:var(--text-muted); margin-bottom:4px"><b>STRUCTURED FIELDS:</b></div>
+                    <div>${kvBadges}</div>
+                    <div style="font-size:0.7rem; color:var(--text-muted); margin: 6px 0 4px"><b>STREAM LABELS:</b></div>
+                    <div>${labelsBadges}</div>
+                </div>
+            `;
+            return entry;
         }
 
         function applyLogFilter() {
@@ -948,23 +1485,397 @@
             }
         }
 
-        function refreshAll() {
+        // =====================================================================
+        // VIEW 2: Incident Subgraph Search Implementation
+        // =====================================================================
+        async function executeSubgraphSearch() {
+            const ip = document.getElementById('filter-ip').value.trim();
+            const port = document.getElementById('filter-port').value.trim();
+            const proto = document.getElementById('filter-proto').value;
+            const host = document.getElementById('filter-host').value;
+            const proc = document.getElementById('filter-proc').value.trim();
+            const since = document.getElementById('filter-since').value;
+
+            const params = new URLSearchParams();
+            if (ip) params.set('ip', ip);
+            if (port) params.set('port', port);
+            if (proto) params.set('protocol', proto);
+            if (host) params.set('instance', host);
+            if (proc) params.set('process', proc);
+            if (since) params.set('since', since);
+
+            const statsBadge = document.getElementById('subgraph-stats');
+            statsBadge.textContent = 'Searching...';
+            statsBadge.className = 'badge badge-armed';
+
+            try {
+                const res = await fetch(`/graph/subgraph?${params.toString()}`);
+                const data = await res.json();
+                statsBadge.textContent = `${data.node_count || 0} Nodes • ${data.edge_count || 0} Flows`;
+                statsBadge.className = data.edge_count > 0 ? 'badge badge-healthy' : 'badge badge-novel';
+
+                const wrapper = document.getElementById('subgraph-diagram-wrapper');
+                await renderMermaidSafe(wrapper, 'subgraph-svg', data.mermaid, '<div class="empty-state">No matching communication paths found for these criteria.</div>');
+
+                // Render Subgraph Table
+                const tableCard = document.getElementById('subgraph-table-card');
+                const tbody = document.getElementById('subgraph-tbody');
+                const edges = data.edges || [];
+                if (edges.length > 0) {
+                    tableCard.style.display = 'block';
+                    document.getElementById('subgraph-flows-count').textContent = `${edges.length} flows`;
+                    tbody.innerHTML = '';
+                    edges.forEach(e => {
+                        const row = document.createElement('tr');
+                        row.innerHTML = `
+                            <td style="font-weight:600; color:var(--accent-cyan)">${e.source}</td>
+                            <td style="font-weight:600; color:var(--accent-purple)">${e.target}</td>
+                            <td>${formatFlowProto(e)}</td>
+                            <td>${e.total_volume || 1}</td>
+                            <td>${Math.round(e.rate_1m || 0)}/m</td>
+                            <td><span class="badge ${e.status === 'HEALTHY' ? 'badge-healthy' : 'badge-surging'}">${e.status}</span></td>
+                        `;
+                        tbody.appendChild(row);
+                    });
+                } else {
+                    tableCard.style.display = 'none';
+                }
+
+                // Render Matched Incident Logs
+                const logsSection = document.getElementById('subgraph-logs-section');
+                const logsFeed = document.getElementById('subgraph-logs-feed');
+                const logs = data.matched_logs || [];
+                if (logs.length > 0) {
+                    logsSection.style.display = 'block';
+                    document.getElementById('subgraph-logs-count').textContent = `${logs.length} events`;
+                    logsFeed.innerHTML = '';
+                    logs.forEach(ev => {
+                        logsFeed.appendChild(createLogElement(ev));
+                    });
+                } else {
+                    logsSection.style.display = 'none';
+                }
+            } catch (err) {
+                console.error('Subgraph query error:', err);
+                statsBadge.textContent = 'Error';
+                statsBadge.className = 'badge badge-surging';
+            }
+        }
+
+        function resetSubgraphSearch() {
+            document.getElementById('filter-ip').value = '';
+            document.getElementById('filter-port').value = '';
+            document.getElementById('filter-proto').value = '';
+            document.getElementById('filter-host').value = '';
+            document.getElementById('filter-proc').value = '';
+            document.getElementById('filter-since').value = '1h';
+            executeSubgraphSearch();
+        }
+
+        // =====================================================================
+        // VIEW 3: Host Flows & Time-Lapse Implementation
+        // =====================================================================
+        function selectHfHost(host) {
+            hfSelectedHost = host;
+            renderHfHostPills();
+            renderHostFlowView();
+        }
+
+        function switchHfSubMode(subMode) {
+            hfSubMode = subMode;
+            document.getElementById('btn-hf-mode-flow').className = (subMode === 'flow') ? 'btn btn-active' : 'btn';
+            document.getElementById('btn-hf-mode-tl').className = (subMode === 'timelapse') ? 'btn btn-active' : 'btn';
+            document.getElementById('timelapse-player-bar').style.display = (subMode === 'timelapse') ? 'flex' : 'none';
+
+            if (subMode === 'timelapse') {
+                loadTimeLapse();
+            } else {
+                stopTimeLapsePlay();
+                renderHostFlowView();
+            }
+        }
+
+        async function renderHostFlowView() {
+            if (hfSubMode === 'timelapse') {
+                loadTimeLapse();
+                return;
+            }
+
+            document.getElementById('hf-title').textContent = `Host Data Flow Architecture: ${hfSelectedHost}`;
+            const wrapper = document.getElementById('hf-diagram-wrapper');
+            wrapper.innerHTML = '<div class="empty-state">Loading data flow graph...</div>';
+
+            try {
+                const res = await fetch(`/graph/host-flows?host=${encodeURIComponent(hfSelectedHost)}&since=1h`, { cache: 'no-store' });
+                if (!res.ok) {
+                    wrapper.innerHTML = '<div class="empty-state">Failed to load host flow data.</div>';
+                    return;
+                }
+                const data = await res.json();
+                await renderMermaidSafe(wrapper, 'hf-svg', data.mermaid, '<div class="empty-state">No flow records found for this host.</div>');
+
+                const summary = data.summary || {};
+                document.getElementById('hf-metric-in-rate').textContent = `${summary.inbound_rate || 0} /m`;
+                document.getElementById('hf-metric-in-bw').textContent = formatBytes(summary.inbound_bytes_per_sec || 0);
+                document.getElementById('hf-metric-out-rate').textContent = `${summary.outbound_rate || 0} /m`;
+                document.getElementById('hf-metric-out-bw').textContent = formatBytes(summary.outbound_bytes_per_sec || 0);
+                document.getElementById('hf-metric-procs').textContent = (summary.active_processes || []).length;
+                document.getElementById('hf-metric-procs-sub').textContent = (summary.active_processes || []).join(', ') || 'None';
+                document.getElementById('hf-metric-links').textContent = (summary.inbound_flows || 0) + (summary.outbound_flows || 0);
+                document.getElementById('hf-metric-links-sub').textContent = `${summary.inbound_flows || 0} in / ${summary.outbound_flows || 0} out`;
+            } catch (err) {
+                console.error('Error fetching host flows:', err);
+                wrapper.innerHTML = '<div class="empty-state">Failed to fetch host flows.</div>';
+            }
+        }
+
+        async function loadTimeLapse() {
+            document.getElementById('hf-title').textContent = `Temporal Time-Lapse Playback: ${hfSelectedHost}`;
+            const wrapper = document.getElementById('hf-diagram-wrapper');
+            wrapper.innerHTML = '<div class="empty-state">Generating time-lapse slices...</div>';
+
+            try {
+                const res = await fetch(`/graph/time-lapse?host=${encodeURIComponent(hfSelectedHost)}&since=1h&slices=12`, { cache: 'no-store' });
+                if (!res.ok) {
+                    wrapper.innerHTML = '<div class="empty-state">Failed to load time-lapse data.</div>';
+                    return;
+                }
+                timeLapseData = await res.json();
+                const slider = document.getElementById('tl-slider');
+                slider.max = Math.max(0, (timeLapseData.slices || []).length - 1);
+                slider.value = 0;
+                renderTimeLapseFrame(0);
+            } catch (err) {
+                console.error('Error loading time lapse:', err);
+                wrapper.innerHTML = '<div class="empty-state">Failed to generate time-lapse slices.</div>';
+            }
+        }
+
+        async function renderTimeLapseFrame(index) {
+            if (!timeLapseData || !timeLapseData.slices || !timeLapseData.slices[index]) return;
+            const slice = timeLapseData.slices[index];
+            const total = timeLapseData.slices.length;
+
+            document.getElementById('tl-label-current').textContent = `Frame ${index + 1}/${total}`;
+            document.getElementById('tl-label-time').textContent = slice.time_label;
+
+            const deltaLabel = document.getElementById('tl-label-delta');
+            if (slice.new_edges && slice.new_edges.length > 0) {
+                deltaLabel.textContent = `⚡ +${slice.new_edges.length} New Edge(s)`;
+            } else {
+                deltaLabel.textContent = '';
+            }
+
+            const wrapper = document.getElementById('hf-diagram-wrapper');
+            await renderMermaidSafe(wrapper, 'tl-svg', slice.mermaid, '<div class="empty-state">No active connections during this slice.</div>');
+
+            document.getElementById('hf-metric-in-rate').textContent = `${slice.total_volume || 0} events`;
+            document.getElementById('hf-metric-in-bw').textContent = formatBytes(slice.bytes_per_sec || 0);
+            document.getElementById('hf-metric-out-rate').textContent = `${slice.active_edges ? slice.active_edges.length : 0} links`;
+            document.getElementById('hf-metric-out-bw').textContent = slice.time_label;
+            document.getElementById('hf-metric-procs').textContent = slice.active_nodes ? slice.active_nodes.length : 0;
+            document.getElementById('hf-metric-procs-sub').textContent = 'Nodes in slice';
+            document.getElementById('hf-metric-links').textContent = slice.new_edges ? slice.new_edges.length : 0;
+            document.getElementById('hf-metric-links-sub').textContent = 'New connections';
+        }
+
+        function onTimeLapseScrub(val) {
+            renderTimeLapseFrame(parseInt(val, 10));
+        }
+
+        function stepTimeLapse(delta) {
+            const slider = document.getElementById('tl-slider');
+            let nextVal = parseInt(slider.value, 10) + delta;
+            const maxVal = parseInt(slider.max, 10);
+            if (nextVal > maxVal) nextVal = 0;
+            if (nextVal < 0) nextVal = maxVal;
+            slider.value = nextVal;
+            renderTimeLapseFrame(nextVal);
+        }
+
+        function toggleTimeLapsePlay() {
+            if (timeLapsePlaying) {
+                stopTimeLapsePlay();
+            } else {
+                startTimeLapsePlay();
+            }
+        }
+
+        function startTimeLapsePlay() {
+            timeLapsePlaying = true;
+            document.getElementById('btn-tl-play').textContent = '⏸ Pause';
+            timeLapseTimer = setInterval(() => {
+                stepTimeLapse(1);
+            }, timeLapseSpeed);
+        }
+
+        function stopTimeLapsePlay() {
+            timeLapsePlaying = false;
+            document.getElementById('btn-tl-play').textContent = '▶ Play';
+            if (timeLapseTimer) {
+                clearInterval(timeLapseTimer);
+                timeLapseTimer = null;
+            }
+        }
+
+        function changeTimeLapseSpeed() {
+            timeLapseSpeed = parseInt(document.getElementById('tl-speed').value, 10);
+            if (timeLapsePlaying) {
+                stopTimeLapsePlay();
+                startTimeLapsePlay();
+            }
+        }
+
+        // Keyboard navigation for time-lapse
+        window.addEventListener('keydown', (e) => {
+            if (currentMode === 'hostflow' && hfSubMode === 'timelapse') {
+                if (e.code === 'Space') {
+                    e.preventDefault();
+                    toggleTimeLapsePlay();
+                } else if (e.code === 'ArrowLeft') {
+                    e.preventDefault();
+                    stepTimeLapse(-1);
+                } else if (e.code === 'ArrowRight') {
+                    e.preventDefault();
+                    stepTimeLapse(1);
+                }
+            }
+        });
+
+        // =====================================================================
+        // VIEW 4: GraphQL Console Implementation
+        // =====================================================================
+        const GQL_PRESETS = {
+            incident: `query IncidentAnalysis {
+  subgraph(port: 443, since: "1h", depth: 1) {
+    querySummary
+    totalFlows
+    totalVolume
+    nodes {
+      id
+      name
+      type
+      status
+    }
+    edges {
+      id
+      source { id name }
+      target { id name }
+      protocol
+      rate1m
+      strokeWidth
+      status
+    }
+    mermaid
+    matchedLogs {
+      timestamp
+      instance
+      event
+      raw
+    }
+  }
+}`,
+            host: `query HostDataFlow {
+  hostFlows(host: "hub", since: "1h") {
+    summary {
+      hostId
+      hostName
+      inboundFlows
+      outboundFlows
+      inboundRate
+      outboundRate
+      activeProcesses
+    }
+    nodes { id name type }
+    edges { id protocol rate1m }
+    mermaid
+  }
+}`,
+            timelapse: `query TemporalTimeLapse {
+  timeLapse(since: "1h", slices: 6) {
+    totalSlices
+    since
+    slices {
+      sliceIndex
+      timeLabel
+      totalVolume
+      bytesPerSec
+      activeNodes { id }
+      newEdges { id protocol }
+      mermaid
+    }
+  }
+}`,
+            fleet: `query FleetOverview {
+  fleet {
+    uptimeSeconds
+    summary {
+      totalNodes
+      totalEdges
+      activeShifts
+      fleetStatus
+    }
+    nodes {
+      id
+      name
+      type
+      ip
+      status
+    }
+    shifts {
+      type
+      severity
+      message
+    }
+    mermaid
+  }
+}`
+        };
+
+        function applyGqlPreset() {
+            const key = document.getElementById('gql-preset-select').value;
+            document.getElementById('gql-input').value = GQL_PRESETS[key] || '';
+        }
+
+        async function runGraphqlQuery() {
+            const query = document.getElementById('gql-input').value.trim();
+            const timing = document.getElementById('gql-timing');
+            timing.textContent = 'Evaluating...';
+            const t0 = performance.now();
+
+            try {
+                const res = await fetch('/graphql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query })
+                });
+                const data = await res.json();
+                const ms = (performance.now() - t0).toFixed(1);
+                timing.textContent = `${ms} ms`;
+                document.getElementById('gql-output').textContent = JSON.stringify(data, null, 2);
+            } catch (e) {
+                timing.textContent = 'Failed';
+                document.getElementById('gql-output').textContent = 'Error: ' + e.message;
+            }
+        }
+
+        // Initialize on Load
+        window.addEventListener('mermaid-ready', () => {
             fetchGraphData();
             renderDiagram();
             fetchNodeLogs(selectedNodeId);
-        }
 
-        window.addEventListener('mermaid-ready', () => {
-            refreshAll();
-            // 15s periodic diagram re-render without page reload
+            // Auto-refresh topology every 15s
             diagramTimer = setInterval(() => {
-                fetchGraphData();
-                renderDiagram();
+                if (currentMode === 'topology') {
+                    fetchGraphData();
+                    renderDiagram();
+                }
             }, 15000);
 
-            // 3s live tail timer
+            // Auto-live tail every 3s
             liveTailTimer = setInterval(() => {
-                if (liveTailActive) {
+                if (liveTailActive && selectedNodeId) {
                     fetchNodeLogs(selectedNodeId);
                 }
             }, 3000);

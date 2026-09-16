@@ -143,5 +143,38 @@ check("an unverifiable bot is not punished for existing",
       B.profile([ng("203.0.113.23", "/", "SemrushBot/7~bl", t=1)],
                 rdns={})["203.0.113.23"]["inconsistency"] == 0)
 
+
+# --- the structured seam ----------------------------------------------------
+# An ECS row's `raw` may be a bare message with no access-log syntax in it, so
+# reading kv is not an optimisation here -- it is the only way the row is
+# legible at all.
+check("complete kv is used", (B.from_fields(
+    {"ip": "1.2.3.4", "path": "/a", "status": 404, "method": "GET"}) or {})["path"] == "/a")
+check("an integer status is coerced to str for the 404-run compare",
+      B.from_fields({"ip": "1.2.3.4", "path": "/a", "status": 404})["status"] == "404")
+check("ip alone falls through to the regexes",
+      B.from_fields({"ip": "1.2.3.4"}) is None)
+check("ip+path without a status falls through (a partial parse invents an actor)",
+      B.from_fields({"ip": "1.2.3.4", "path": "/a"}) is None)
+check("None and {} are safe", B.from_fields(None) is None and B.from_fields({}) is None)
+check("a non-HTTP kv is not mistaken for a request",
+      B.from_fields({"ip": "1.2.3.4", "process": "sshd"}) is None)
+
+# profile() must reach the same verdict whichever representation it is given.
+_RAW = ('198.51.100.7 - - [16/Sep/2026:00:00:0%d +0000] '
+        '"GET /wp-login.php HTTP/1.1" 404 134 "-" "curl/8"')
+raw_events = [{"raw": _RAW % i, "timestamp": 1789516800 + i} for i in range(5)]
+kv_events = [{"raw": "", "kv": {"ip": "198.51.100.7", "path": "/wp-login.php",
+                                "status": "404", "method": "GET", "proto": "1.1",
+                                "ua": "curl/8", "referer": "-"},
+              "timestamp": 1789516800 + i} for i in range(5)]
+pr = B.profile(raw_events)["198.51.100.7"]
+pk = B.profile(kv_events)["198.51.100.7"]
+check("raw and structured produce the same request count",
+      pr["requests"] == pk["requests"] == 5)
+check("raw and structured produce the same deception score",
+      pr["inconsistency"] == pk["inconsistency"],
+      "raw=%s structured=%s" % (pr["inconsistency"], pk["inconsistency"]))
+
 print("  ---", "ALL PASS" if ok else "FAILURES PRESENT")
 raise SystemExit(0 if ok else 1)

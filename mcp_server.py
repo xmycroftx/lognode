@@ -412,6 +412,217 @@ def get_traffic_shifts() -> str:
         return f"LogNode get_traffic_shifts error: {e}"
 
 
+def get_subgraph(
+    ip: Optional[str] = None,
+    port: Optional[int] = None,
+    protocol: Optional[str] = None,
+    instance: Optional[str] = None,
+    process: Optional[str] = None,
+    since: Optional[str] = "1h",
+    depth: int = 1,
+    format: Optional[str] = "json"
+) -> str:
+    """
+    Search and extract an incident subgraph by IP/CIDR, port, protocol, host instance,
+    or process name across current topology and historical network telemetry.
+
+    Args:
+        ip: Target IP or CIDR to isolate (e.g. '127.0.0.1', '192.0.2.10/24').
+        port: Target TCP/UDP port number (e.g. 443, 22, 53, 9514).
+        protocol: Network protocol (e.g. 'tcp', 'udp', 'dns', 'ssh').
+        instance: Host/instance name (e.g. 'hub', 'laptop', 'vault-host').
+        process: Process name or command (e.g. 'sshd', 'nginx', 'python3').
+        since: Historical time window (e.g. '5m', '15m', '1h', '6h', '24h'). Default '1h'.
+        depth: BFS hop traversal depth from matched nodes (default 1).
+        format: Output format ('json' for structured breakdown, 'mermaid' for visual diagram).
+    """
+    try:
+        params = {
+            "ip": ip,
+            "port": port,
+            "protocol": protocol,
+            "instance": instance,
+            "process": process,
+            "since": since,
+            "depth": depth
+        }
+        fmt = (format or "json").lower()
+        if fmt == "mermaid":
+            params["format"] = "mermaid"
+            filtered = {k: v for k, v in params.items() if v is not None}
+            url = f"{LOGNODE_URL}/graph/subgraph?" + urllib.parse.urlencode(filtered)
+            req = urllib.request.Request(url, headers={"User-Agent": "LogNode-MCP/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                chart = resp.read().decode("utf-8")
+            return f"```mermaid\n{chart}\n```"
+
+        params["format"] = "json"
+        data = _http_get("/graph/subgraph", params)
+        if data.get("error"):
+            return f"Subgraph query error: {data['error']}"
+
+        summary = data.get("summary", {})
+        nodes = data.get("nodes", [])
+        edges = data.get("edges", [])
+        matched_flows = summary.get("matched_flows", len(edges))
+        corr_events = data.get("correlated_events", [])
+
+        lines = [
+            "=== LogNode Incident Subgraph ===",
+            f"Nodes: {len(nodes)} | Edges: {len(edges)} | Matched Flows: {matched_flows} | Correlated Events: {len(corr_events)}",
+            f"Filters: ip={ip or '*'}, port={port or '*'}, proto={protocol or '*'}, host={instance or '*'}, proc={process or '*'}, since={since or '1h'}",
+            "-" * 70,
+            "Nodes:"
+        ]
+        for n in nodes:
+            lines.append(f"  • {n.get('id')} [{n.get('type')}]: {n.get('role')} (Status: {n.get('status')})")
+
+        lines.append("\nFlow Edges:")
+        for e in sorted(edges, key=lambda x: x.get("rate_1m", 0), reverse=True):
+            status_icon = "🟢" if e.get("status") == "HEALTHY" else ("🔴" if e.get("status") == "SILENT" else "🟡")
+            lines.append(
+                f"  {status_icon} {e.get('source')} -> {e.get('target')} [{e.get('protocol')}:{e.get('channel')}]"
+                f" | 1m Rate: {e.get('rate_1m', 0):.0f}/min | 15m: {e.get('baseline_15m', 0):.1f}/min | Status: {e.get('status')}"
+            )
+
+        if corr_events:
+            lines.append(f"\nCorrelated Network Telemetry Events (showing up to 10 of {len(corr_events)}):")
+            for ev in corr_events[:10]:
+                ts = ev.get("timestamp", "")
+                host_label = ev.get("labels", {}).get("instance", "")
+                raw = ev.get("raw", "")
+                lines.append(f"  [{ts}] [{host_label}] {raw}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"LogNode get_subgraph error: {e}"
+
+
+def get_host_flows(
+    host: str,
+    since: Optional[str] = "1h",
+    format: Optional[str] = "json"
+) -> str:
+    """
+    Retrieve directed 3-tier process-level data flow graph for a single host
+    (Inbound Clients -> Host Sockets/Processes -> Outbound Cloud/Peer Destinations).
+
+    Args:
+        host: Target host name (e.g. 'hub', 'laptop', 'vault-host', 'laptop').
+        since: Historical time window (e.g. '5m', '15m', '1h', '6h', '24h'). Default '1h'.
+        format: Output format ('json' for structured breakdown, 'mermaid' for visual flowchart).
+    """
+    try:
+        fmt = (format or "json").lower()
+        params = {"host": host, "since": since}
+        if fmt == "mermaid":
+            params["format"] = "mermaid"
+            filtered = {k: v for k, v in params.items() if v is not None}
+            url = f"{LOGNODE_URL}/graph/host-flows?" + urllib.parse.urlencode(filtered)
+            req = urllib.request.Request(url, headers={"User-Agent": "LogNode-MCP/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                chart = resp.read().decode("utf-8")
+            return f"```mermaid\n{chart}\n```"
+
+        data = _http_get("/graph/host-flows", params)
+        if data.get("error"):
+            return f"Host flows error: {data['error']}"
+
+        summary = data.get("summary", {})
+        inbound = data.get("inbound", [])
+        outbound = data.get("outbound", [])
+
+        lines = [
+            f"=== LogNode Data Flows for Host: {data.get('host', host)} ===",
+            f"Time Window: {since} | Inbound Clients: {len(inbound)} | Outbound Destinations: {len(outbound)}",
+            "-" * 70,
+            "Inbound Traffic (Clients -> Host):"
+        ]
+        if inbound:
+            for f in sorted(inbound, key=lambda x: x.get("rate_1m", 0), reverse=True):
+                lines.append(f"  ⬇️ {f.get('source')} -> port {f.get('port')} [{f.get('protocol')}] ({f.get('process') or 'unknown'}) | 1m Rate: {f.get('rate_1m', 0):.1f}/min")
+        else:
+            lines.append("  (No inbound traffic detected in time window)")
+
+        lines.append("\nOutbound Traffic (Host -> External/Peers):")
+        if outbound:
+            for f in sorted(outbound, key=lambda x: x.get("rate_1m", 0), reverse=True):
+                lines.append(f"  ⬆️ {f.get('process') or 'process'} -> {f.get('target')}:{f.get('port')} [{f.get('protocol')}] | 1m Rate: {f.get('rate_1m', 0):.1f}/min")
+        else:
+            lines.append("  (No outbound traffic detected in time window)")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"LogNode get_host_flows error: {e}"
+
+
+def get_time_lapse(
+    host: Optional[str] = None,
+    ip: Optional[str] = None,
+    port: Optional[int] = None,
+    since: Optional[str] = "1h",
+    slices: int = 12
+) -> str:
+    """
+    Retrieve discrete temporal time-lapse slices with connection delta detection
+    (identifying newly formed, persisting, or terminated communication edges).
+
+    Args:
+        host: Host name to scope time-lapse playback.
+        ip: Target IP address to isolate.
+        port: Target port number.
+        since: Total playback time window (e.g. '15m', '1h', '6h', '24h'). Default '1h'.
+        slices: Number of discrete time slices (default 12, max 60).
+    """
+    try:
+        params = {
+            "host": host,
+            "ip": ip,
+            "port": port,
+            "since": since,
+            "slices": slices
+        }
+        data = _http_get("/graph/time-lapse", params)
+        if data.get("error"):
+            return f"Time-lapse error: {data['error']}"
+
+        time_slices = data.get("slices", [])
+        lines = [
+            f"=== LogNode Temporal Time-Lapse Playback ===",
+            f"Target: host={host or '*'}, ip={ip or '*'}, port={port or '*'} | Window: {since} ({len(time_slices)} slices of {data.get('slice_duration_s', 0):.0f}s)",
+            "-" * 70
+        ]
+        for s in time_slices:
+            idx = s.get("index", 0) + 1
+            ts = time.strftime("%H:%M:%S", time.gmtime(s.get("timestamp", 0)))
+            total_edges = s.get("total_edges", 0)
+            new_edges = s.get("new_edges", 0)
+            new_desc = f" | ⚡ +{new_edges} NEW edges: {', '.join(s.get('new_edge_keys', []))}" if new_edges > 0 else ""
+            lines.append(f"Slice #{idx:02d} [{ts}] | Active Edges: {total_edges} | Rate: {s.get('total_rate', 0):.1f}/min{new_desc}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"LogNode get_time_lapse error: {e}"
+
+
+def query_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Execute an arbitrary GraphQL query against LogNode's /graphql endpoint.
+
+    Args:
+        query: GraphQL query or mutation string.
+        variables: Optional variables dictionary.
+    """
+    try:
+        payload = {"query": query}
+        if variables:
+            payload["variables"] = variables
+        data = _http_post("/graphql", payload)
+        return json.dumps(data, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"LogNode GraphQL error: {e}"
+
+
 
 # =====================================================================
 # Standalone Pure-Python JSON-RPC stdio Engine (Zero external deps)
@@ -533,6 +744,53 @@ def triage_summary() -> str:
             % (d.get("awaiting_triage", 0),
                ", ".join("%s=%s" % kv for kv in sorted(by.items())) or "none",
                d.get("oldest_untriaged") or "-"))
+
+
+def list_campaign_actors(limit: int = 50) -> str:
+    """
+    List attributed campaign actors with their generated codenames, TTP profiles, and follow-up tags.
+    Useful for tracking adversary campaigns across rotating IP addresses and observing long-term trends.
+    """
+    data = _http_get("/threats/campaigns", {"limit": limit})
+    rows = data.get("campaign_actors", [])
+    if not rows:
+        return "No campaign actors currently tagged in persistent registry."
+    out = ["%d campaign actor(s):" % len(rows), ""]
+    for r in rows:
+        tags_str = ", ".join(r.get("followup_tags", [])) or "no follow-up tags"
+        emoji_prefix = f"{r.get('emoji')} " if r.get('emoji') else ""
+        out.append(f"  [{r.get('actor_id')}] {emoji_prefix}{r.get('codename')} (Tier: {r.get('threat_tier')})")
+        out.append(f"       TTPs: {r.get('fingerprint')}")
+        out.append(f"       Follow-up tags: {tags_str}")
+        if r.get("notes"):
+            out.append(f"       Notes: {r.get('notes')}")
+        if r.get("first_seen"):
+            out.append(f"       First Seen: {r.get('first_seen')}")
+        if r.get("last_seen"):
+            out.append(f"       Last Seen: {r.get('last_seen')}")
+        out.append("")
+    return "\n".join(out)
+
+
+def tag_campaign_actor(actor_id: str, followup_tags: List[str], notes: str = "",
+                       codename: Optional[str] = None, emoji: Optional[str] = None,
+                       fingerprint: Optional[str] = None) -> str:
+    """
+    Tag an attributed campaign actor with follow-up directives (e.g. ['firewall-block', 'monitor-ssh'])
+    and investigation notes for long-term tracking.
+    """
+    body = {
+        "followup_tags": followup_tags,
+        "notes": notes,
+        "codename": codename,
+        "emoji": emoji,
+        "fingerprint": fingerprint
+    }
+    data = _http_post(f"/threats/campaign/{actor_id}/tag", body)
+    if data.get("error"):
+        return f"Error: {data['error']}"
+    r = data.get("campaign_actor", {})
+    return f"Tagged actor {r.get('actor_id')} ({r.get('codename')}) with tags: {r.get('followup_tags')}"
 
 
 TOOL_REGISTRY = {
@@ -673,6 +931,91 @@ TOOL_REGISTRY = {
             "type": "object",
             "properties": {}
         }
+    },
+    "get_subgraph": {
+        "fn": get_subgraph,
+        "description": "Search and extract an incident subgraph by IP/CIDR, port, protocol, host, or process across topology and network events.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ip": {"type": "string", "description": "Target IP address or CIDR to isolate."},
+                "port": {"type": "integer", "description": "Target TCP/UDP port number."},
+                "protocol": {"type": "string", "description": "Network protocol (e.g. tcp, udp, dns, ssh)."},
+                "instance": {"type": "string", "description": "Host/instance name (e.g. hub, laptop, vault-host)."},
+                "process": {"type": "string", "description": "Process name (e.g. sshd, nginx, python3)."},
+                "since": {"type": "string", "description": "Time window (e.g. '5m', '15m', '1h', '24h'). Default '1h'."},
+                "depth": {"type": "integer", "description": "BFS hop traversal depth (default 1)."},
+                "format": {"type": "string", "enum": ["json", "mermaid"], "description": "Output format: 'json' or 'mermaid'."}
+            }
+        }
+    },
+    "get_host_flows": {
+        "fn": get_host_flows,
+        "description": "Retrieve directed 3-tier process-level data flows for a single host (inbound -> sockets -> outbound).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Host name (e.g. hub, laptop, vault-host)."},
+                "since": {"type": "string", "description": "Time window (e.g. '5m', '15m', '1h', '24h'). Default '1h'."},
+                "format": {"type": "string", "enum": ["json", "mermaid"], "description": "Output format: 'json' or 'mermaid'."}
+            },
+            "required": ["host"]
+        }
+    },
+    "get_time_lapse": {
+        "fn": get_time_lapse,
+        "description": "Retrieve discrete temporal time-lapse slices with connection delta detection.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Host name to scope time-lapse."},
+                "ip": {"type": "string", "description": "Target IP address."},
+                "port": {"type": "integer", "description": "Target port number."},
+                "since": {"type": "string", "description": "Time window (e.g. '15m', '1h', '24h'). Default '1h'."},
+                "slices": {"type": "integer", "description": "Number of time slices (default 12)."}
+            }
+        }
+    },
+    "query_graphql": {
+        "fn": query_graphql,
+        "description": "Execute an arbitrary GraphQL query or mutation against LogNode's /graphql endpoint.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The GraphQL query string."},
+                "variables": {"type": "object", "description": "Optional variables dictionary."}
+            },
+            "required": ["query"]
+        }
+    },
+    "list_campaign_actors": {
+        "fn": list_campaign_actors,
+        "description": "List attributed adversary campaign actors with their generated codenames, TTP profiles, and follow-up tags.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max actors to return (default 50)."}
+            }
+        }
+    },
+    "tag_campaign_actor": {
+        "fn": tag_campaign_actor,
+        "description": "Tag an attributed campaign actor with follow-up directives (e.g. ['firewall-block', 'monitor-ssh']) and investigation notes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "actor_id": {"type": "string", "description": "The campaign actor ID (e.g. 'ACTOR-4B2E')."},
+                "followup_tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of follow-up tags or directives (e.g. ['firewall-block', 'monitor-ssh'])."
+                },
+                "notes": {"type": "string", "description": "Investigation notes or triage context."},
+                "codename": {"type": "string", "description": "Optional codename override."},
+                "fingerprint": {"type": "string", "description": "Optional technique fingerprint."}
+            },
+            "required": ["actor_id", "followup_tags"]
+        }
     }
 }
 
@@ -805,6 +1148,10 @@ def run_mcp_sdk():
     from mcp.server import MCPServer
 
     server = MCPServer("lognode")
+    server.tool()(list_findings)
+    server.tool()(get_finding)
+    server.tool()(submit_verdict)
+    server.tool()(triage_summary)
     server.tool()(query_logs)
     server.tool()(get_fleet_stats)
     server.tool()(list_templates)
@@ -813,6 +1160,12 @@ def run_mcp_sdk():
     server.tool()(get_anomalies)
     server.tool()(get_traffic_graph)
     server.tool()(get_traffic_shifts)
+    server.tool()(get_subgraph)
+    server.tool()(get_host_flows)
+    server.tool()(get_time_lapse)
+    server.tool()(query_graphql)
+    server.tool()(list_campaign_actors)
+    server.tool()(tag_campaign_actor)
     server.tool()(test_discord_alert)
 
     sys.stderr.write(f"[LogNode MCP] Official SDK server running (LogNode URL: {LOGNODE_URL})\n")

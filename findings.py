@@ -44,6 +44,21 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 CREATE INDEX IF NOT EXISTS idx_findings_state ON findings (state, last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_kind  ON findings (kind, last_seen DESC);
+
+CREATE TABLE IF NOT EXISTS campaign_actors (
+    actor_id        TEXT PRIMARY KEY,
+    codename        TEXT NOT NULL,
+    emoji           TEXT NOT NULL DEFAULT '',
+    fingerprint     TEXT NOT NULL,
+    threat_tier     TEXT NOT NULL DEFAULT 'ELEVATED',
+    tags            TEXT[] NOT NULL DEFAULT '{}',
+    followup_tags   TEXT[] NOT NULL DEFAULT '{}',
+    notes           TEXT NOT NULL DEFAULT '',
+    first_seen      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE campaign_actors ADD COLUMN IF NOT EXISTS emoji TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_campaign_actors_last_seen ON campaign_actors (last_seen DESC);
 """
 
 STATES = ("new", "triaging", "triaged", "dismissed", "actioned")
@@ -173,6 +188,58 @@ async def summary(pool) -> Dict[str, Any]:
             "oldest_untriaged": oldest}
 
 
+async def list_campaign_actors(pool, limit: int = 100) -> List[Dict[str, Any]]:
+    """List persistent campaign actors and their long-term TTP attributions."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT actor_id, codename, emoji, fingerprint, threat_tier,
+                   tags, followup_tags, notes, first_seen, last_seen
+            FROM campaign_actors
+            ORDER BY last_seen DESC
+            LIMIT $1
+            """, limit)
+        res = []
+        for r in rows:
+            d = dict(r)
+            if hasattr(d.get("first_seen"), "isoformat"):
+                d["first_seen"] = d["first_seen"].isoformat()
+            if hasattr(d.get("last_seen"), "isoformat"):
+                d["last_seen"] = d["last_seen"].isoformat()
+            res.append(d)
+        return res
+
+
+async def tag_campaign_actor(pool, actor_id: str, followup_tags: List[str],
+                             notes: Optional[str] = None, codename: Optional[str] = None,
+                             emoji: Optional[str] = None,
+                             fingerprint: Optional[str] = None, threat_tier: Optional[str] = None,
+                             tags: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Assign follow-up tags and investigative notes to a campaign actor."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO campaign_actors (actor_id, codename, emoji, fingerprint, threat_tier, tags, followup_tags, notes)
+            VALUES ($1, COALESCE($2, 'UNKNOWN'), COALESCE($3, ''), COALESCE($4, ''), COALESCE($5, 'ELEVATED'),
+                    COALESCE($6, '{}'::text[]), $7, COALESCE($8, ''))
+            ON CONFLICT (actor_id) DO UPDATE
+               SET followup_tags = EXCLUDED.followup_tags,
+                   notes         = CASE WHEN EXCLUDED.notes != '' THEN EXCLUDED.notes ELSE campaign_actors.notes END,
+                   codename      = CASE WHEN EXCLUDED.codename != 'UNKNOWN' THEN EXCLUDED.codename ELSE campaign_actors.codename END,
+                   emoji         = CASE WHEN EXCLUDED.emoji != '' THEN EXCLUDED.emoji ELSE campaign_actors.emoji END,
+                   last_seen     = NOW()
+            RETURNING actor_id, codename, emoji, fingerprint, threat_tier, tags, followup_tags, notes, first_seen, last_seen
+            """,
+            actor_id, codename or "UNKNOWN", emoji or "", fingerprint or "", threat_tier or "ELEVATED",
+            tags or [], followup_tags, notes or "")
+        d = dict(row)
+        if hasattr(d.get("first_seen"), "isoformat"):
+            d["first_seen"] = d["first_seen"].isoformat()
+        if hasattr(d.get("last_seen"), "isoformat"):
+            d["last_seen"] = d["last_seen"].isoformat()
+        return d
+
+
 # --- escalation policy -----------------------------------------------------
 #
 # What is worth a human at all. Deliberately narrow: a queue that collects every
@@ -192,6 +259,17 @@ ESCALATE_ON_REPEAT = ("webshell-probe", "cms-probe", "appliance-probe")
 REPEAT_THRESHOLD = int(os.environ.get("LOGNODE_FINDING_REPEAT", "3"))
 SCORE_FLOOR = int(os.environ.get("LOGNODE_FINDING_SCORE", "40"))
 DECEPTION_FLOOR = int(os.environ.get("LOGNODE_FINDING_DECEPTION", "40"))
+
+# How often the sweep looks for new actors worth raising.
+#
+# This constant lived in server.py and was deleted by accident when the policy
+# above was moved here -- the edit removed a contiguous range that happened to
+# contain it. Nothing caught that: it is referenced exactly once, inside the
+# sweep loop, so the module imported fine, the task started, did one pass, and
+# died with a NameError that only appeared in the journal. The triage queue was
+# silently not running for a day. It lives with the policy it paces now, where
+# deleting one and keeping the other is harder to do without noticing.
+SWEEP_SECONDS = int(os.environ.get("LOGNODE_FINDING_SWEEP", "300"))
 
 
 def should_raise(actor: Dict[str, Any]) -> str:
