@@ -253,6 +253,16 @@ fleet of ~90 hosts at a few hundred lines a minute writes about 675 MB a day.
 `schema.sql` is the table definition and is applied at boot (`IF NOT EXISTS`
 throughout, so it is safe against an existing database).
 
+## Collectors
+
+Optional, and plain enough to read in a sitting:
+
+* `netsnap.py` — a socket snapshot (`ss -tunp`) on a timer, recording which
+  process held a connection to which address. A snapshot deliberately, not
+  syscall auditing: it misses short-lived connections and costs almost nothing.
+* `unitwatch.py` — reports failed systemd units, with a heartbeat every sweep so
+  a dead collector is distinguishable from a healthy fleet.
+
 ## Requirements
 
 Python 3.11+, PostgreSQL 14+ with `pg_trgm`, and a model endpoint. `asyncpg` and
