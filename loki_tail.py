@@ -254,9 +254,11 @@ class LokiSource:
 
 async def run(mode: str, source: LokiSource, fwd: Forwarder, state_file: str,
               start_back_s: int, poll_s: int, seen: Optional[Seen] = None,
-              once: bool = False) -> int:
+              once: bool = False, overlap_s: int = 30) -> int:
     """The main loop. Returns the final cursor. `once` runs a single poll."""
     seen = seen or Seen()
+    overlap_ns = int(overlap_s * 1e9)
+    polls = [0]
     cursor = load_cursor(state_file) or int((time.time() - start_back_s) * 1e9)
 
     async def deliver(entries) -> int:
@@ -268,12 +270,23 @@ async def run(mode: str, source: LokiSource, fwd: Forwarder, state_file: str,
         return len(fresh)
 
     async def fill_gap() -> int:
-        # Poll from the cursor up to a few seconds ago -- Loki's ingesters may
-        # still be receiving the very latest second, so leave it for the tail.
+        # Poll from a little BEFORE the cursor up to a few seconds ago. Loki
+        # accepts entries out of order within its ingester window, so a line
+        # timestamped before the cursor can still appear after the poll that
+        # passed it; re-reading the overlap and letting the seen-set drop the
+        # repeats is what turns "usually complete" into "complete". The tail end
+        # stays a couple of seconds short of now for the same reason.
+        #
+        # Not on the FIRST poll of a process, though: the seen-set is empty
+        # after a restart, so an overlap there would re-send up to 30 seconds
+        # of entries the previous process already delivered. The first poll
+        # resumes exactly at the cursor; the overlap applies from the second.
         end = int((time.time() - 2) * 1e9)
-        if end <= cursor:
+        start = cursor + 1 if polls[0] == 0 else max(1, cursor - overlap_ns)
+        polls[0] += 1
+        if end <= start:
             return 0
-        n = await deliver(await source.poll(cursor + 1, end))
+        n = await deliver(await source.poll(start, end))
         return n
 
     attempt = 0
@@ -324,7 +337,8 @@ async def main() -> int:
         await run(mode, source, fwd,
                   state_file=os.environ.get("LOKI_STATE_FILE", "loki_tail.state"),
                   start_back_s=parse_duration(os.environ.get("LOKI_START", "15m")),
-                  poll_s=int(os.environ.get("LOKI_POLL_S", "5")))
+                  poll_s=int(os.environ.get("LOKI_POLL_S", "5")),
+                  overlap_s=parse_duration(os.environ.get("LOKI_OVERLAP", "30s"), 30))
     return 0
 
 
