@@ -108,12 +108,16 @@ TECHNIQUES: List[Tuple[str, str, Any]] = [
         r"|/_debugbar|/horizon(?:/|$)|/log-viewer|/nginx_status|/containers/json"
         r"|/_ignition|/__clockwork|/rails/info", re.I)),
 
-    # Scanning for exposed MCP servers -- /mcp, /mcp-sse, /sse, /query on a
-    # host that serves none. Nobody had these on a wordlist a year ago; a
-    # reachable MCP endpoint is tool execution with whatever rights the server
-    # runs under, which is why it is its own technique and not "api-discovery".
+    # Scanning for exposed MCP servers -- /mcp, /mcp-sse, /sse on a host that
+    # serves none. Nobody had these on a wordlist a year ago; a reachable MCP
+    # endpoint is tool execution with whatever rights the server runs under,
+    # which is why it is its own technique and not "api-discovery".
+    #
+    # /query is deliberately NOT here: it is InfluxDB ("/query?q=SHOW..."),
+    # Elasticsearch and GraphQL far more often than MCP, and including it tagged
+    # a Docker-registry scanner (/query + /v2/_catalog) as an MCP hunter.
     ("mcp-probe", "discovery", re.compile(
-        r"^/(?:mcp(?:-sse)?|mcp/|\.well-known/mcp|sse|messages|query)(?:$|[/?])", re.I)),
+        r"^/(?:mcp(?:-sse)?|mcp/|\.well-known/mcp|sse|messages)(?:$|[/?])", re.I)),
 
     ("api-discovery", "discovery", re.compile(
         r"^/(?:graphql|api(?:$|/)|v[0-9]+/|swagger|openapi|\.well-known/)"
@@ -406,6 +410,91 @@ def generate_actor_profile(fingerprint: str, techniques: Optional[List[str]] = N
         "tags": tags,
         "fingerprint": fingerprint
     }
+
+
+# --- descriptive auto-tags -----------------------------------------------------
+#
+# What an actor IS, computed from what it did and where it lives -- as opposed
+# to followup_tags, which are what a human decided to DO about it (block, watch,
+# allowlist). Everything here is derivable from fields the actor already
+# carries after enrichment and behavioural profiling, so all 390-odd actors get
+# labelled without anyone typing, and the queue can filter ("mass-scanner and
+# exploit-attempt, not research-scanner") instead of being read line by line.
+#
+# Ownership is matched on the org string from Team Cymru whois, which is the
+# netblock's registered owner -- authoritative, not a claim. You cannot fake
+# owning Censys's ARIN allocation, which is exactly why research-scanner is
+# trusted enough to suppress escalation while a User-Agent saying "Censys"
+# would not be.
+
+CLOUD_ORGS = ("DIGITALOCEAN", "AMAZON", "AWS", "GOOGLE-CLOUD", "GOOGLE LLC",
+              "MICROSOFT", "AZURE", "AKAMAI", "LINODE", "ALIBABA", "UCLOUD",
+              "GCORE", "G-CORE", "OVH", "VULTR", "HETZNER", "ORACLE", "TENCENT",
+              "CONTABO", "LEASEWEB", "HOSTGLOBAL", "ZENLAYER", "DIGITAL OCEAN",
+              "CLOUDFLARE", "SCALEWAY", "CHOOPA", "KAMATERA")
+
+RESEARCH_ORGS = ("CENSYS", "SHODAN", "INTERNET-MEASUREMENT", "INTERNETMEASUREMENT",
+                 "INTERNET MEASUREMENT", "BINARYEDGE", "DRIFTNET", "STRETCHOID",
+                 "ALPHASTRIKE", "ALPHA STRIKE", "SECURITYTRAILS", "RECYBER",
+                 "PALO ALTO", "PALOALTO", "RWTH", "ACADEMY", "UNIVERSITY",
+                 "SECURITY RESEARCH", "PROJECT25499", "ONYPHE", "NETSYSTEMS")
+
+_CRAWLER_CLAIM = ("googlebot", "bingbot", "duckduckbot", "yandexbot",
+                  "baiduspider", "applebot", "crawler", "spider")
+
+
+def classify_actor(actor: Dict[str, Any],
+                   mass_technique_floor: int = 8,
+                   deception_floor: int = 40,
+                   wordlist_floor: int = 20,
+                   burst_floor: float = 5.0) -> List[str]:
+    """Descriptive tags for one fully-assembled actor. Pure; order-stable.
+
+    Defensive about missing fields: an un-enriched actor still gets its
+    technique and behaviour tags, just not the ownership ones. Never raises --
+    a classification failure must not remove a finding.
+    """
+    tags = set()
+    techs = actor.get("techniques") or {}
+    named = [t for t in techs if t and t != "unknown"]
+
+    # technique-shape
+    if len(named) >= mass_technique_floor:
+        tags.add("mass-scanner")
+    if any(t in techs for t in ("rce-attempt", "webshell-probe")):
+        tags.add("exploit-attempt")
+    if any(t in techs for t in ("private-key-theft", "secret-file-harvest")):
+        tags.add("credential-harvester")
+    if "mcp-probe" in techs:
+        tags.add("mcp-hunter")
+
+    # behaviour
+    if (actor.get("inconsistency") or 0) >= deception_floor:
+        tags.add("deceptive")
+    if (actor.get("longest_404_run") or 0) >= wordlist_floor:
+        tags.add("wordlist-walker")
+    if (actor.get("peak_rate_per_s") or 0) >= burst_floor:
+        tags.add("burst")
+    for tell in (actor.get("tells") or []):
+        low = tell.lower()
+        if "claims" in low and any(c in low for c in _CRAWLER_CLAIM):
+            tags.add("crawler-impostor")
+            break
+
+    # ownership (authoritative netblock owner)
+    org = (actor.get("org") or "").upper()
+    if org:
+        if any(r in org for r in RESEARCH_ORGS):
+            tags.add("research-scanner")
+        if any(c in org for c in CLOUD_ORGS):
+            tags.add("cloud-hosted")
+
+    # the noise floor: one hit, recon-only, nothing else. The 260 single pokes
+    # that are not worth a human's eye. Only when nothing louder applies.
+    if (actor.get("hits") or 0) == 1 and set(named) <= {"recon"} and not tags:
+        tags.add("single-touch")
+
+    return sorted(tags)
 
 
 def build_threat_view(events: List[Dict[str, Any]],

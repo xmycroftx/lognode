@@ -86,8 +86,10 @@ for p in ["/cloudbuild.yaml", "/azure-pipelines.yml", "/bitbucket-pipelines.yml"
     check("ci/iac: %s" % p, tech(p) == "ci-config-exposure", tech(p))
 for p in ["/_debugbar/open", "/horizon/dashboard", "/log-viewer", "/nginx_status", "/containers/json"]:
     check("debug surface: %s" % p, tech(p) == "info-disclosure", tech(p))
-for p in ["/mcp", "/mcp-sse", "/sse", "/query", "/mcp/", "/.well-known/mcp"]:
+for p in ["/mcp", "/mcp-sse", "/sse", "/mcp/", "/.well-known/mcp"]:
     check("MCP probe: %s" % p, tech(p) == "mcp-probe", tech(p))
+# /query was removed from mcp-probe -- it is InfluxDB/Elasticsearch/GraphQL far more often
+check("/query is NOT mcp-probe anymore", tech("/query") != "mcp-probe", tech("/query"))
 check("/fetch?url= is still SSRF ahead of everything", tech("/fetch?url=http://x") == "ssrf-metadata")
 check("/api/ is still api-discovery, not mcp", tech("/api/v1/users") == "api-discovery")
 check("a .json under an app route is not a key file", tech("/data/products.json") != "private-key-theft", tech("/data/products.json"))
@@ -230,6 +232,53 @@ check("...and the status comes from the line too", _hit["status"] == "404")
 _ecs = {"raw": "just a message", "kv": {"ip": "1.2.3.4", "path": "/.env", "status": "404"}, "labels": {}}
 check("kv is still used when the raw is not an access line",
       (ttp._event_to_hit(_ecs) or {}).get("path") == "/.env")
+
+
+# --- descriptive auto-tags (classify_actor) ----------------------------------
+def A(**kw):
+    kw.setdefault("techniques", {}); kw.setdefault("hits", kw.get("hits", 5))
+    return kw
+ca = ttp.classify_actor
+
+check("mass-scanner at >=8 techniques",
+      "mass-scanner" in ca(A(techniques={k:1 for k in
+        ("recon","cms-probe","secret-file-harvest","vcs-exposure","info-disclosure",
+         "api-discovery","backup-hunt","path-traversal")})))
+check("7 techniques is not yet mass-scanner",
+      "mass-scanner" not in ca(A(techniques={k:1 for k in
+        ("recon","cms-probe","secret-file-harvest","vcs-exposure","info-disclosure",
+         "api-discovery","backup-hunt")})))
+check("exploit-attempt on rce", "exploit-attempt" in ca(A(techniques={"rce-attempt":1})))
+check("exploit-attempt on webshell", "exploit-attempt" in ca(A(techniques={"webshell-probe":1})))
+check("credential-harvester on private-key", "credential-harvester" in ca(A(techniques={"private-key-theft":1})))
+check("mcp-hunter on mcp-probe", "mcp-hunter" in ca(A(techniques={"mcp-probe":1})))
+check("deceptive at inconsistency 40", "deceptive" in ca(A(techniques={"recon":1}, inconsistency=40)))
+check("not deceptive at 39", "deceptive" not in ca(A(techniques={"recon":1}, inconsistency=39)))
+check("wordlist-walker at 404-run 20", "wordlist-walker" in ca(A(techniques={"cms-probe":1}, longest_404_run=25)))
+check("burst at 5 req/s", "burst" in ca(A(techniques={"recon":1}, peak_rate_per_s=6)))
+check("crawler-impostor from a contradicted tell",
+      "crawler-impostor" in ca(A(techniques={"recon":1},
+        tells=["claims googlebot but the address has no reverse DNS -- ..."])))
+check("cloud-hosted from the org netblock owner",
+      "cloud-hosted" in ca(A(techniques={"recon":1}, org="DIGITALOCEAN-ASN - DigitalOcean, LLC, US")))
+check("research-scanner from Censys ownership",
+      "research-scanner" in ca(A(techniques={"recon":1}, org="CENSYS-ARIN-01 - Censys, Inc., US")))
+check("research-scanner is authoritative, not the UA -- a fake Censys UA on a cloud net is not tagged",
+      "research-scanner" not in ca(A(techniques={"recon":1}, org="DIGITALOCEAN-ASN - DigitalOcean", user_agents=["CensysInspect"])))
+check("single-touch: one recon hit, nothing else",
+      ca(A(techniques={"recon":1}, hits=1)) == ["single-touch"])
+check("single-touch does NOT apply once something louder does",
+      "single-touch" not in ca(A(techniques={"recon":1}, hits=1, org="DIGITALOCEAN")))
+check("an un-enriched exploit actor still gets its behaviour/technique tags",
+      set(ca(A(techniques={"rce-attempt":1}, longest_404_run=30))) == {"exploit-attempt","wordlist-walker"})
+check("classify never raises on an empty actor", ca({}) == [])
+
+# --- mcp-probe no longer swallows /query -------------------------------------
+check("/query?q=SHOW+DIAGNOSTICS is not mcp-probe (InfluxDB)",
+      tech("/query?q=SHOW+DIAGNOSTICS") != "mcp-probe", tech("/query?q=SHOW+DIAGNOSTICS"))
+check("/mcp still is mcp-probe", tech("/mcp") == "mcp-probe")
+check("/mcp-sse still is mcp-probe", tech("/mcp-sse") == "mcp-probe")
+check("/sse still is mcp-probe", tech("/sse") == "mcp-probe")
 
 print("  ---", "ALL PASS" if ok else "FAILURES PRESENT")
 raise SystemExit(0 if ok else 1)

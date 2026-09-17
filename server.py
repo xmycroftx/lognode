@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+from typing import Dict
 import asyncio
 import json
 import re
@@ -438,6 +439,16 @@ async def handle_threats(request: web.Request) -> web.Response:
                 a["peak_rate_per_s"] = prof["peak_rate_per_s"]
                 a["connections"] = prof["connections"]
                 a["longest_404_run"] = prof["longest_404_run"]
+        # Descriptive auto-tags, now that each actor has techniques + ownership
+        # + behaviour merged. What it IS; followup_tags stay what a human wants
+        # DONE about it.
+        for a in view.get("actors", []):
+            a["auto_tags"] = ttp.classify_actor(a)
+        _tag_totals: Dict[str, int] = {}
+        for a in view.get("actors", []):
+            for tg in a["auto_tags"]:
+                _tag_totals[tg] = _tag_totals.get(tg, 0) + 1
+        view["auto_tag_totals"] = dict(sorted(_tag_totals.items(), key=lambda kv: -kv[1]))
         view["actors"].sort(key=lambda x: (-(x.get("inconsistency") or 0), -x["score"]))
     except Exception as exc:
         print("[Threats] behavioural profiling failed (%s)" % exc)

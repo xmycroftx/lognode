@@ -197,7 +197,9 @@ async function load(){
         (a.org?'<div class="paths">'+esc(a.org.slice(0,34))+'</div>':'')+'</td>'+
       '<td>'+a.hostile_hits+(a.benign_hits?' <span style="color:var(--text-dim)">(+'+a.benign_hits+' benign)</span>':'')+'</td>'+
       '<td>'+esc((a.targets||[]).join(', '))+'</td>'+
-      '<td>'+Object.entries(a.techniques).map(([t,n])=>'<span class="chip'+
+      '<td>'+
+        (a.auto_tags||[]).map(t=>'<span class="chip" style="border-color:var(--purple); color:#d8b4fe">'+esc(t)+'</span>').join('')+
+        Object.entries(a.techniques).map(([t,n])=>'<span class="chip'+
           (["critical","high"].includes(SEV[t])?' hot':'')+'">'+esc(t)+' '+n+'</span>').join('')+
         '<div class="paths">'+esc((a.sample_paths||[]).slice(0,5).join('  '))+'</div>'+
         ((a.tells&&a.tells.length)?'<div class="tells">'+a.tells.map(t=>'▸ '+esc(t)).join('<br>')+'</div>':'')+
