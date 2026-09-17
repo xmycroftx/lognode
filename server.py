@@ -14,6 +14,7 @@ import schema
 DASHBOARD_FILE = Path(__file__).parent / "dashboard.html"
 SEARCH_FILE = Path(__file__).parent / "search.html"
 THREATS_FILE = Path(__file__).parent / "threats.html"
+PRESENCE_FILE = Path(__file__).parent / "presence.html"
 
 pipeline = AsyncLogPipeline()
 START_TIME = time.time()
@@ -343,6 +344,55 @@ async def handle_findings_summary(request: web.Request) -> web.Response:
 def _jdump(obj) -> str:
     """Timestamps and UUIDs are not JSON; say so in ISO rather than crashing."""
     return json.dumps(obj, default=str)
+
+# Interactive auth events -- the ones that place a human/agent on a host.
+PRESENCE_EVENTS = ('auth_ssh_accepted', 'auth_session_opened', 'auth_session_closed', 'auth_sudo_command', 'auth_sudo_failed')
+
+
+async def _presence_rows(since_s: int, per_event_limit: int = 5000):
+    rows = []
+    for e in PRESENCE_EVENTS:
+        rows += await pipeline.pg.query_logs(event=e, since_s=since_s, limit=per_event_limit)
+    return rows
+
+
+async def handle_presence(request: web.Request) -> web.Response:
+    """Who is authenticated on which host, from where. See presence.py.
+
+    ?format=json returns the model; otherwise the page. ?since= sets the window.
+    """
+    import presence
+    since = request.query.get("since", "24h")
+    mult = {"m": 60, "h": 3600, "d": 86400, "s": 1}
+    try:
+        since_s = int(since[:-1]) * mult[since[-1]] if since[-1] in mult else int(since)
+    except Exception:
+        since_s = 86400
+
+    if request.query.get("format") == "json":
+        rows = await _presence_rows(since_s)
+        pres = presence.build_presence(rows)
+        # the tripwire, computed against a longer baseline that excludes the
+        # window itself: logins over 30d, split at the window boundary.
+        base_s = max(since_s, int(os.environ.get("LOGNODE_PRESENCE_BASELINE", str(30 * 86400))))
+        logins = await pipeline.pg.query_logs(event="auth_ssh_accepted", since_s=base_s, limit=20000)
+        import time as _t
+        cutoff = _t.time() - since_s
+        recent = [r for r in logins if presence._ts(r.get("timestamp")) and presence._ts(r["timestamp"]) >= cutoff]
+        baseline = [r for r in logins if presence._ts(r.get("timestamp")) and presence._ts(r["timestamp"]) < cutoff]
+        unexpected = presence.new_presence(presence.build_presence(recent),
+                                           presence.build_presence(baseline))
+        hosts = [{"host": h, "principals": ps} for h, ps in sorted(pres.items())]
+        return web.json_response({"window": since, "hosts": hosts,
+                                  "host_count": len(hosts),
+                                  "principal_count": sum(len(h["principals"]) for h in hosts),
+                                  "unexpected": unexpected})
+
+    if PRESENCE_FILE.exists():
+        return web.Response(text=PRESENCE_FILE.read_text(encoding="utf-8"),
+                            content_type="text/html")
+    return web.json_response({"error": "presence.html missing"}, status=404)
+
 
 async def handle_threats(request: web.Request) -> web.Response:
     """Hostile traffic, clustered by technique and by actor fingerprint.
@@ -1440,6 +1490,35 @@ async def findings_sweep():
                         raised += 1
                     if raised:
                         print("[Findings] %d threat actor(s) awaiting triage" % raised)
+
+                # Presence tripwire: an interactive login to a host/user pair
+                # never seen, or a known user from a new source. On a key-only
+                # fleet a successful login is rare and this is the high-signal
+                # event -- more than any web scanner.
+                import presence, time as _t
+                base_s = int(os.environ.get("LOGNODE_PRESENCE_BASELINE", str(30 * 86400)))
+                recent_s = int(os.environ.get("LOGNODE_PRESENCE_WINDOW", "3600"))
+                logins = await pipeline.pg.query_logs(
+                    event="auth_ssh_accepted", since_s=base_s, limit=20000)
+                cutoff = _t.time() - recent_s
+                recent = [r for r in logins if presence._ts(r.get("timestamp"))
+                          and presence._ts(r["timestamp"]) >= cutoff]
+                if recent:
+                    baseline = [r for r in logins if presence._ts(r.get("timestamp"))
+                                and presence._ts(r["timestamp"]) < cutoff]
+                    unexpected = presence.new_presence(
+                        presence.build_presence(recent), presence.build_presence(baseline))
+                    for u in unexpected:
+                        await F.record(
+                            pipeline.pg.pool, kind="unexpected_login",
+                            subject="%s@%s" % (u["user"], u["src_ip"] or "?"),
+                            instance=u["host"],
+                            severity_hint=("high" if u["kind"] == "new-host-user" else "medium"),
+                            evidence={"reason": "%s: %s on %s from %s"
+                                      % (u["kind"], u["user"], u["host"], u["src_ip"] or "unknown source"),
+                                      **u})
+                    if unexpected:
+                        print("[Findings] %d unexpected login(s) awaiting triage" % len(unexpected))
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -1517,6 +1596,7 @@ async def main():
     app.router.add_get("/query", handle_query)
     app.router.add_get("/search", handle_search_ui)
     app.router.add_get("/threats", handle_threats)
+    app.router.add_get("/presence", handle_presence)
     app.router.add_get("/threats/campaigns", handle_list_campaigns)
     app.router.add_post("/threats/campaign/{actor_id}/tag", handle_tag_campaign)
     app.router.add_post("/threats/actor/{actor_id}/tag", handle_tag_campaign)

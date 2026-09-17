@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 MODULES = ["server.py", "engine.py", "findings.py", "ecs.py", "schema.py", "behaviour.py",
-           "ttp.py", "graph.py", "fields.py", "enrich.py", "alert.py",
+           "ttp.py", "graph.py", "fields.py", "enrich.py", "alert.py", "presence.py",
            "mcp_server.py", "netsnap.py", "unitwatch.py", "loki_tail.py"]
 
 try:
