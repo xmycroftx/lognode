@@ -10,6 +10,7 @@ from pathlib import Path
 from aiohttp import web
 from engine import AsyncLogPipeline
 import schema
+import presence
 
 DASHBOARD_FILE = Path(__file__).parent / "dashboard.html"
 SEARCH_FILE = Path(__file__).parent / "search.html"
@@ -361,7 +362,6 @@ async def handle_presence(request: web.Request) -> web.Response:
 
     ?format=json returns the model; otherwise the page. ?since= sets the window.
     """
-    import presence
     since = request.query.get("since", "24h")
     mult = {"m": 60, "h": 3600, "d": 86400, "s": 1}
     try:
@@ -376,8 +376,7 @@ async def handle_presence(request: web.Request) -> web.Response:
         # window itself: logins over 30d, split at the window boundary.
         base_s = max(since_s, int(os.environ.get("LOGNODE_PRESENCE_BASELINE", str(30 * 86400))))
         logins = await pipeline.pg.query_logs(event="auth_ssh_accepted", since_s=base_s, limit=20000)
-        import time as _t
-        cutoff = _t.time() - since_s
+        cutoff = time.time() - since_s
         recent = [r for r in logins if presence._ts(r.get("timestamp")) and presence._ts(r["timestamp"]) >= cutoff]
         baseline = [r for r in logins if presence._ts(r.get("timestamp")) and presence._ts(r["timestamp"]) < cutoff]
         unexpected = presence.new_presence(presence.build_presence(recent),
@@ -1495,12 +1494,11 @@ async def findings_sweep():
                 # never seen, or a known user from a new source. On a key-only
                 # fleet a successful login is rare and this is the high-signal
                 # event -- more than any web scanner.
-                import presence, time as _t
                 base_s = int(os.environ.get("LOGNODE_PRESENCE_BASELINE", str(30 * 86400)))
                 recent_s = int(os.environ.get("LOGNODE_PRESENCE_WINDOW", "3600"))
                 logins = await pipeline.pg.query_logs(
                     event="auth_ssh_accepted", since_s=base_s, limit=20000)
-                cutoff = _t.time() - recent_s
+                cutoff = time.time() - recent_s
                 recent = [r for r in logins if presence._ts(r.get("timestamp"))
                           and presence._ts(r["timestamp"]) >= cutoff]
                 if recent:
